@@ -1,0 +1,4 @@
+[submodule "upstream/Mindustry"]
+	path = upstream/Mindustry
+	url = https://github.com/Anuken/Mindustry.git
+	shallow = true

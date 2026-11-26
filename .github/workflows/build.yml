@@ -1,0 +1,52 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Simulation tests (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install Pillow
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-pil
+      - name: Run host tests (AddressSanitizer + UBSan)
+        run: sh tests/run_host.sh
+
+  nintendo-3ds:
+    name: 3DSX + CIA
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends python3-pil build-essential git ca-certificates
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Generate assets from upstream Mindustry and compile for the 3DS
+        run: make -j2
+      - name: Build makerom / bannertool from pinned sources
+        run: bash tools/install_cia_tools.sh
+      - name: Package CIA
+        run: |
+          source .cia-tools/env.sh
+          bash tools/build_cia.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mindustry-3ds
+          path: |
+            mindustry-3ds.3dsx
+            mindustry-3ds.cia
+            mindustry-3ds.smdh
+          if-no-files-found: error

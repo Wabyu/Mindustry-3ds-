@@ -1,0 +1,14 @@
+# generated from upstream/Mindustry by tools/build_assets.py
+/build/
+/romfs/gfx/
+/romfs/maps/
+/romfs/lang/
+# outputs
+*.3dsx
+*.cia
+*.elf
+*.smdh
+*.map
+# host packaging tools (tools/install_cia_tools.sh)
+/.cia-tools/
+__pycache__/

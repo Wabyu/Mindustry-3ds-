@@ -88,6 +88,7 @@ AccessControlInfo:
     OutputDebugString: 61
   ServiceAccessControl:
     - APT:U
+    - dsp::DSP
     - cfg:u
     - fs:USER
     - gsp::Gpu
@@ -99,6 +100,7 @@ SystemControlInfo:
   StackSize: 0x40000
   Dependency:
     am: 0x0004013000001502
+    dsp: 0x0004013000001a02
     cfg: 0x0004013000001702
     gsp: 0x0004013000001c02
     hid: 0x0004013000001d02

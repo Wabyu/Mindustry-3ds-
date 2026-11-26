@@ -49,7 +49,13 @@ all: assets
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile MDT_INNER=1 CPPFILES="$(SRC_CPP)"
 
 # Everything generated from the pinned upstream Mindustry checkout
-assets: build/gen/.stamp
+MUSIC := $(addprefix $(ROMFS)/music/,$(addsuffix .pcm,menu game1 game2))
+assets: build/gen/.stamp $(MUSIC)
+
+$(ROMFS)/music/%.pcm: $(UPSTREAM)/core/assets/music/%.ogg
+	@mkdir -p $(@D)
+	ffmpeg -nostdin -v error -y -i $< -vn -ac 2 -ar 22050 -f s16le $@.tmp
+	mv $@.tmp $@
 
 build/gen/.stamp: $(wildcard tools/*.py)
 	@test -f $(UPSTREAM)/core/src/mindustry/content/Blocks.java || { echo "upstream/Mindustry missing: git submodule update --init --depth 1"; exit 1; }
@@ -71,7 +77,7 @@ scenes: assets
 clean:
 	@echo cleaning generated files
 	@rm -rf build/arm build/gen build/gfx build/host build/gen-host build/romfs-host build/scenes build/scenes-nosnap
-	@rm -rf $(ROMFS)/gfx $(ROMFS)/maps $(ROMFS)/lang
+	@rm -rf $(ROMFS)/music $(ROMFS)/gfx $(ROMFS)/maps $(ROMFS)/lang
 	@rm -f $(TARGET).3dsx $(TARGET).smdh $(TARGET).elf $(TARGET).cia
 
 else
@@ -82,7 +88,7 @@ OFILES  := $(CPPFILES:.cpp=.o)
 DEPENDS := $(OFILES:.o=.d)
 .PHONY: all
 all: $(OUTPUT).3dsx
-$(OUTPUT).3dsx: $(OUTPUT).elf $(_3DSXDEPS)
+$(OUTPUT).3dsx: $(OUTPUT).elf $(_3DSXDEPS) $(wildcard $(TOPDIR)/romfs/music/*.pcm)
 $(OUTPUT).elf: $(OFILES)
 -include $(DEPENDS)
 endif

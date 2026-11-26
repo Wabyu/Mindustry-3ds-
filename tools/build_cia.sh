@@ -10,6 +10,6 @@ command -v "$BANNERTOOL" >/dev/null || { echo "bannertool not found: run tools/i
 mkdir -p build
 "$BANNERTOOL" makebanner -i cia/banner.png -a cia/silence.wav -o build/banner.bnr
 "$MAKEROM" -f cia -o mindustry-3ds.cia -target t -rsf cia/mindustry-3ds.rsf -elf mindustry-3ds.elf \
-  -icon mindustry-3ds.smdh -banner build/banner.bnr -exefslogo -major 0 -minor 3 -micro 0
+  -icon mindustry-3ds.smdh -banner build/banner.bnr -exefslogo -major 0 -minor 3 -micro 1
 python3 tools/verify_cia.py mindustry-3ds.cia
 echo "CIA written: mindustry-3ds.cia"

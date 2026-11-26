@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include "app.hpp"
+#include "music.hpp"
 #include "gfx.hpp"
 #include "gfx_quad.hpp"
 #include "sprites_gen.hpp"
@@ -163,6 +164,9 @@ int main() {
     } else {
         mdt::App app;
         app.init();
+        music::init();
+        bool danger = false;
+        u64 checkThreat = 0;
         u64 last = osGetTime();
         while (aptMainLoop() && !app.wantsExit()) {
             hidScanInput();
@@ -189,6 +193,16 @@ int main() {
             if (delta < 0.25f) delta = 0.25f;
             if (delta > 3.f) delta = 3.f;
             app.frame(in, delta);
+            if (app.screen == mdt::Screen::Game && now >= checkThreat) {
+                auto* core = app.game.core(mdt::TeamSharded);
+                danger = core && core->health < 0.85f * core->def().health;
+                checkThreat = now + 1000;
+            }
+            music::Scene scene = music::Scene::Menu;
+            if (app.screen == mdt::Screen::End) scene = music::Scene::Silent;
+            else if (app.screen != mdt::Screen::Menu) scene = danger ? music::Scene::Danger : music::Scene::Calm;
+            else { checkThreat = 0; danger = false; }
+            music::update(scene, app.musicVolume);
 
             C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
             C2D_TextBufClear(textBuf);
@@ -196,6 +210,7 @@ int main() {
             C3D_FrameEnd(0);
         }
         if (app.screen == mdt::Screen::Game || app.screen == mdt::Screen::Pause) app.saveCurrent();
+        music::shutdown();
     }
     C2D_TextBufDelete(textBuf);
     for (int s = 0; s < MDT_SHEET_COUNT; s++) if (sheets[s]) C2D_SpriteSheetFree(sheets[s]);

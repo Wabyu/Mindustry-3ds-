@@ -1,5 +1,12 @@
 # Mindustry 3DS
 
+### Musique sur Old 3DS — 0.3.1
+
+Trois pistes de Mindustry v146 sont intégrées au RomFS. Le menu joue en boucle, et une partie utilise une ambiance calme ou une piste de tension lorsque le noyau passe sous 85 % de santé. Les morceaux en partie sont espacés par une minute de silence. Dans Pause, L/R ou les deux côtés de la ligne BGM règlent le volume. Le réglage est conservé sur SD.
+
+Pour compiler, installer aussi FFmpeg. Pour entendre la musique sur console, vérifier la présence de `SD:/3ds/dspfirm.cdc` (Rosalina → Miscellaneous options → Dump DSP firmware). Le jeu continue si NDSP est indisponible. Les pistes sont converties en PCM16 stéréo à 22 050 Hz et lues progressivement avec trois tampons de 32 Kio.
+
+
 Portage natif de **Mindustry v146** (Anuke, GPLv3) pour **Nintendo 3DS**, conçu pour la **Old 3DS XL** (ARM11 268 MHz, mode application 64 Mo), compatible New 3DS.
 
 Ce dépôt prend la suite de Forge3DS 1.4.6. Forge3DS était une réimplémentation « inspirée de » Mindustry, avec des valeurs recopiées à la main et un rendu logiciel. Mindustry 3DS est construit **à partir du projet open source original** : le dépôt [Anuken/Mindustry](https://github.com/Anuken/Mindustry) est inclus comme sous-module, épinglé sur le tag `v146`, et tout le contenu du jeu en est extrait au moment de la compilation.

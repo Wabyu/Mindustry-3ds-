@@ -40,6 +40,7 @@ public:
     uint8_t rotation = 0;
     int cursorDX = 3, cursorDY = 0;  // cursor offset from the player, in tiles
     float camX = 0, camY = 0;
+    unsigned musicVolume = 75;
     int menuIndex = 0, pauseIndex = 0;
     bool captured[SECTOR_COUNT] = {};
     bool hasSave[SECTOR_COUNT] = {};

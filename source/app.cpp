@@ -125,6 +125,9 @@ static const char* kCategoryEn[CAT_COUNT] = {"Turrets", "Production", "Distribut
 
 // ---------------------------------------------------------------- app
 void App::init() {
+    std::vector<uint8_t> setting;
+    if (readFile(dataPath("volume.bin"), setting) && setting.size() == 1 && setting[0] <= 100)
+        musicVolume = setting[0];
     lang.load(languageCode());
     loadCampaign();
 }
@@ -268,6 +271,12 @@ void App::updateMenu(const Input& in) {
 }
 
 void App::updatePause(const Input& in) {
+    if ((in.down & (KL | KR)) || (in.touchStart && in.touchY >= 201 && in.touchY < 238)) {
+        int step = (in.down & KL) || (in.touchStart && in.touchX < 160) ? -25 : 25;
+        musicVolume = std::clamp(int(musicVolume) + step, 0, 100);
+        writeFileAtomic(dataPath("volume.bin"), {static_cast<uint8_t>(musicVolume)});
+        return;
+    }
     if (in.down & KDown) pauseIndex = (pauseIndex + 1) % 3;
     if (in.down & KUp) pauseIndex = (pauseIndex + 2) % 3;
     int choice = -1;
@@ -1061,6 +1070,8 @@ void App::drawBottom() {
             if (i == pauseIndex) gfx::rectLine(30, y, 260, 38, 2, kAccent);
             gfx::text(160, y + 10, 0.55f, 0xffffffff, lang.ui(items[i]).c_str(), 1);
         }
+        std::snprintf(buf, sizeof buf, "L   -       BGM  %u%%       +   R", musicVolume);
+        gfx::text(160, 209, 0.5f, kAccent, buf, 1);
         return;
     }
     if (screen == Screen::End) {

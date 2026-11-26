@@ -47,6 +47,8 @@ BUILDABLE = {
     "combustionGenerator": "ConsumeGen",
     "powerNode": "PowerNode", "battery": "Battery",
     "solarPanel": "Solar", "largeSolarPanel": "Solar",
+    "mechanicalPump": "Pump", "conduit": "Conduit", "liquidTank": "LiquidRouter",
+    "steamGenerator": "ConsumeGen",
     "duo": "ItemTurret", "scatter": "ItemTurret", "hail": "ItemTurret",
     "copperWall": "Wall", "copperWallLarge": "Wall",
     "titaniumWall": "Wall", "titaniumWallLarge": "Wall",
@@ -55,6 +57,8 @@ BUILDABLE = {
     "container": "Storage", "vault": "Storage",
 }
 UNITS = ["dagger", "flare", "alpha", "beta"]
+# Liquids.java fields ported so far (extensible: add oil, cryofluid, slag...)
+LIQUIDS = ["water"]
 ENV_FLOOR = {"Floor", "ShallowLiquid", "EmptyFloor", "SteamVent", "AirBlock"}
 ENV_OVERLAY = {"OreBlock", "OverlayFloor", "SpawnBlock"}
 ENV_WALL = {"StaticWall", "StaticTree", "TreeBlock", "TallBlock", "StaticClusterWall"}
@@ -337,6 +341,9 @@ def collect_blocks(up, used_env_names):
             m = re.match(r"consumeLiquid\(Liquids\.(\w+),\s*([^)]*)\)\.boost\(\)", st)
             if m:
                 b["boost"] = (m.group(1), jc.evaluate(m.group(2), {}))
+            m = re.match(r"consumeLiquid\(Liquids\.(\w+),\s*([^)]*)\)$", st)
+            if m:  # ConsumeLiquid: amount per tick
+                b["liquid_use"] = (m.group(1), jc.evaluate(m.group(2), {}))
             if st.startswith("consume(new ConsumeItemFlammable"):
                 b["flammable"] = True
             m = re.match(r"outputItem\s*=\s*new ItemStack\(Items\.(\w+),\s*(\d+)\)", st)
@@ -385,6 +392,11 @@ def collect_blocks(up, used_env_names):
             drop = b["vals"].get("itemDrop")
             if isinstance(drop, jc.Ref):
                 b["item_drop"] = items[drop.field]
+            ld = b["vals"].get("liquidDrop")
+            if isinstance(ld, jc.Ref):
+                b["liquid_drop"] = ld.field
+            elif d.cls == "ShallowLiquid":
+                b["liquid_drop"] = "water"  # ShallowLiquid.set(water / taintedWater, floor): liquidBase.liquidDrop
             blocks.append(b)
         else:
             # requirements of non-ported blocks may still be referenced (ItemStack.mult)
@@ -419,6 +431,19 @@ def collect_items(up):
     order = {f: i for i, f in enumerate(serpulo)}
     out = [i for i in out if i["field"] in order]
     out.sort(key=lambda i: order[i["field"]])
+    return out
+
+
+def collect_liquids(up):
+    out = []
+    for d in jc.parse_defs(os.path.join(up.src, "content", "Liquids.java")):
+        if d.field not in LIQUIDS:
+            continue
+        vals, _ = eval_def(up, d)
+        m = re.search(r'Color\.valueOf\("([0-9a-fA-F]+)"\)', d.args)
+        out.append({"field": d.field, "name": d.name, "color": int(m.group(1)[:6], 16) if m else 0xffffff,
+                    "flammability": vals.get("flammability", 0) or 0, "temperature": vals.get("temperature", 0.5) or 0.5})
+    out.sort(key=lambda l: LIQUIDS.index(l["field"]))
     return out
 
 
@@ -582,6 +607,10 @@ def main():
             canvas = compose_icon(up, layers, int(b["vals"].get("size", 1) or 1))
             b["square"] = canvas.getchannel("A").getextrema()[0] >= int(0.9 * 255)
     items = collect_items(up)
+    liquids = collect_liquids(up)
+    liquid_ids = {l["field"]: i for i, l in enumerate(liquids)}
+    for b in blocks:
+        b["liquid_ids"] = liquid_ids
     units = collect_units(up)
     sectors = collect_sectors(up)
     item_ids = {it["name"]: i for i, it in enumerate(items)}
@@ -597,7 +626,7 @@ def main():
     sprites = Sprites(up)
     if not args.skip_sprites:
         assign_sprites(up, sprites, blocks, items, units)
-    write_content(args.gen, blocks, items, units, sectors, sprites, block_ids, item_ids, unit_ids)
+    write_content(args.gen, blocks, items, units, sectors, sprites, block_ids, item_ids, unit_ids, liquids)
 
     os.makedirs(os.path.join(args.romfs, "maps"), exist_ok=True)
     report = {}
@@ -666,6 +695,22 @@ def assign_sprites(up, sp, blocks, items, units):
                     b["spr_extra"] = k
                 sp.add_derived(src + "-bothalf", src, lambda im: im.crop((im.width // 2, 0, im.width, im.height)))
             continue
+        if t == "Conduit":
+            # Conduit.drawAt: bottom (Draw.color(botColor 565656), multiplied), liquid, top; 5 blend variants
+            b["spr_var"] = sp.add_derived(n + "-bottom-0-tinted", "conduit-bottom-0", lambda im: tint_image(im, 0x565656))
+            for i in range(1, 5):
+                sp.add_derived("%s-bottom-%d-tinted" % (n, i), "conduit-bottom-%d" % i, lambda im: tint_image(im, 0x565656))
+            for i in range(5):
+                sp.add("%s-top-%d" % (n, i))  # spr_var + 5 + i
+            continue
+        if t == "LiquidRouter":  # LiquidRouter.draw: bottom, liquid tiles, region
+            b["spr"] = sp.add(n)
+            b["spr_var"] = sp.add(n + "-bottom")
+            continue
+        if t == "Pump":  # DrawMulti(DrawDefault, DrawPumpLiquid)
+            b["spr"] = sp.add(n)
+            b["spr_top"] = sp.add(n + "-liquid")
+            continue
         if t == "ItemTurret":
             size = b["vals"].get("size", 1)
             b["spr"] = sp.add("block-%d" % size)
@@ -690,6 +735,17 @@ def assign_sprites(up, sp, blocks, items, units):
                     b["spr_rot"] = sp.add(n + suf)
                 else:
                     b["spr_extra"] = sp.add(n + suf)
+        elif t == "ConsumeGen" and b.get("draw_regions"):
+            # steam generator: DrawWarmupRegion(-top), DrawRegion(-turbine) x2, DrawRegion(-cap), DrawLiquidRegion(-liquid)
+            if up.sprite(n + "-top"):
+                b["spr_top"] = sp.add(n + "-top")
+            for suf in b["draw_regions"]:
+                if suf == "-turbine":
+                    b["spr_rot"] = sp.add(n + suf)
+                elif suf == "-cap":
+                    b["spr_extra"] = sp.add(n + suf)
+            if up.sprite(n + "-liquid"):
+                b["spr_var"] = sp.add(n + "-liquid")
         elif t in ("Crafter", "ConsumeGen", "Battery") and up.sprite(n + "-top"):
             b["spr_top"] = sp.add(n + "-top")  # DrawFlame / DrawWarmupRegion / battery charge
         elif t == "Core":
@@ -754,6 +810,10 @@ def icon_layers(up, b):
         if up.sprite(n + "-top"):
             layers.append((n + "-top", False, None))
         return layers
+    if t == "Conduit":                      # Conduit.icons(): conduit-bottom, topRegions[0]
+        return [("conduit-bottom", False, 0x565656), (n + "-top-0", False, None)]
+    if t == "LiquidRouter":                 # LiquidRouter.icons(): bottomRegion, region
+        return [(n + "-bottom", False, None), (n, False, None)]
     if t == "Conveyor":                     # Conveyor.icons(): regions[0][0]
         return [(n + "-0-0", False, None)]
     if t == "Wall":                         # Wall.icons(): name or name + "1"
@@ -768,13 +828,18 @@ def icon_layers(up, b):
 
 
 # --------------------------------------------------------------------------
-def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, unit_ids):
+def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, unit_ids, liquids=()):
     h = ["// generated by tools/build_assets.py from upstream/Mindustry - do not edit",
          "#pragma once", "#include \"content.hpp\"", "namespace mdt {"]
     h.append("enum ItemId : short { %s, ITEM_COUNT };" % ", ".join("I_" + ident(i["name"]) for i in items))
     h.append("enum BlockId : short { %s, BLOCK_COUNT };" % ", ".join("B_" + ident(b["name"]) for b in blocks))
     h.append("enum UnitId : short { %s, UNIT_COUNT };" % ", ".join("U_" + ident(u["name"]) for u in units))
     h.append("enum SectorId : short { %s, SECTOR_COUNT };" % ", ".join("S_" + ident(s["name"]) for s in sectors))
+    h.append("enum LiquidId : short { %s, LIQUID_COUNT };" % ", ".join("L_" + ident(l["name"]) for l in liquids))
+    legacy = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "legacy_blocks_v1.txt")).read().split()
+    h.append("// block names of save format 1 (Mindustry 3DS 0.2), in their saved id order")
+    h.append("constexpr int LEGACY_V1_BLOCK_COUNT = %d;" % len(legacy))
+    h.append("extern const char* const kLegacyV1Blocks[LEGACY_V1_BLOCK_COUNT];")
     h.append("}")
     open(os.path.join(gen, "content_gen.hpp"), "w").write("\n".join(h) + "\n")
 
@@ -839,7 +904,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
                   "{%s}, %d, {%s}, %d, {%d, %d}, %s, %s, %s, "
                   "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %s, "
                   "%s, %s, %d, %s, %s, %s, %s, %s, %s, %d, "
-                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d},") % (
+                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d, %s},") % (
             b["name"], b["type"], cat_i, size, flag("solid"), flag("rotate"), buildable,
             cfloat(health), cfloat(build_cost), int(num("itemCapacity", 10)),
             req_s, len(reqs[:4]), cons_s, len(b["consumes"][:3]),
@@ -857,6 +922,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
             int(shoot.get("shots", 1)), 1 if v.get("targetAir", True) is not False else 0,
             1 if v.get("targetGround", True) is not False else 0, ammo_s, len(b["ammo"][:3]),
             b.get("spr_icon", -1), 1 if b.get("square", True) else 0,
+            liquid_cols(b, num, flag),
         ))
         b["tier"] = int(num("tier"))
     c.append("};")
@@ -885,6 +951,12 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
             u.get("spr", -1), u.get("spr_cell", -1), u.get("spr_base", -1), u.get("spr_leg", -1),
             u.get("spr_weapon", -1), cfloat(un("engineOffset", 5))))
     c.append("};")
+    c.append("const LiquidDef kLiquids[LIQUID_COUNT] = {")
+    for l in liquids:
+        c.append('  {"%s", 0x%06x, %s, %s},' % (l["name"], l["color"], cfloat(l["flammability"]), cfloat(l["temperature"])))
+    c.append("};")
+    legacy = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "legacy_blocks_v1.txt")).read().split()
+    c.append("const char* const kLegacyV1Blocks[LEGACY_V1_BLOCK_COUNT] = {%s};" % ", ".join('"%s"' % n for n in legacy))
     c.append("const SectorDef kSectors[SECTOR_COUNT] = {")
     for s in sectors:
         c.append('  {"%s", %d, %d, %s},' % (s["name"], int(s.get("captureWave", 0) or 0),
@@ -893,6 +965,24 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
     c.append("};")
     c.append("}")
     open(os.path.join(gen, "content_gen.cpp"), "w").write("\n".join(c) + "\n")
+
+
+def liquid_cols(b, num, flag):
+    """Liquid fields of BlockDef: capacity, pumpAmount, consumeLiquid, floor liquidDrop..."""
+    ids = b.get("liquid_ids", {})
+    t = b["type"]
+    has = t in ("Pump", "Conduit", "LiquidRouter") or "liquid_use" in b
+    use = b.get("liquid_use")
+    drop = b.get("liquid_drop")
+    # Block.liquidCapacity defaults to 10; LiquidRouter(20) / tank values come from the class/def
+    cap = num("liquidCapacity", 10) if has else 0
+    # LiquidBlock.outputsLiquid = true (Pump, Conduit, LiquidRouter)
+    outputs = 1 if t in ("Pump", "Conduit", "LiquidRouter") else 0
+    return "%s, %s, %d, %s, %d, %s, %d, %d, %d, %s" % (
+        cfloat(cap), cfloat(num("pumpAmount", 0.2) if t == "Pump" else 0),
+        ids.get(use[0], -1) if use else -1, cfloat(use[1] if use else 0),
+        ids.get(drop, -1) if drop else -1, cfloat(num("liquidMultiplier", 1)),
+        flag("floating"), outputs, 1 if has else 0, cfloat(num("liquidPressure", 1)))
 
 
 # --------------------------------------------------------------------------
@@ -992,6 +1082,7 @@ def write_lang(up, romfs, blocks, items, units):
     keys += ["block.%s.description" % b["name"] for b in blocks if b.get("category")]
     keys += ["item.%s.name" % i["name"] for i in items]
     keys += ["unit.%s.name" % u["name"] for u in units]
+    keys += ["liquid.%s.name" % n for n in ("water",)]
     keys += ["sector.%s.name" % s for s in SECTORS]
     keys += ["sector.%s.description" % s for s in SECTORS]
     keys += ["wave", "wave.waiting", "wave.waveInProgress", "quit", "ok", "back", "loading",

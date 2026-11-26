@@ -217,6 +217,35 @@ int main(int argc, char** argv) {
         record(app, "node_preview");
         app.hideHud = true;
     }
+    // water chain: pump on water -> conduits (curve) -> tank -> conduit -> steam generator
+    {
+        Game& g = app.game;
+        emptyMap(g, 40, 30, B_stone);
+        for (int y = 12; y <= 18; y++) for (int x = 2; x <= 6; x++) g.tile(x, y)->floor = (x < 4 ? B_deep_water : B_shallow_water);
+        int core = g.addBuilding(B_core_shard, 32, 22, TeamSharded, 0);
+        g.builds[core].items.add(I_copper, 200);
+        g.addBuilding(B_mechanical_pump, 5, 15, TeamSharded, 0);
+        g.addBuilding(B_mechanical_pump, 5, 16, TeamSharded, 0);
+        for (int x = 6; x <= 9; x++) g.addBuilding(B_conduit, x, 15, TeamSharded, 0);
+        g.addBuilding(B_conduit, 10, 15, TeamSharded, 3);
+        g.addBuilding(B_conduit, 10, 14, TeamSharded, 3);
+        g.addBuilding(B_liquid_tank, 11, 12, TeamSharded, 0);  // 3x3: 10..12 x 11..13
+        g.addBuilding(B_conduit, 13, 12, TeamSharded, 0);
+        g.addBuilding(B_conduit, 14, 12, TeamSharded, 0);
+        int st = g.addBuilding(B_steam_generator, 15, 12, TeamSharded, 0);
+        g.builds[st].items.add(I_coal, 10);
+        int node = g.addBuilding(B_power_node, 18, 14, TeamSharded, 0);
+        g.togglePowerLink(node, st);
+        for (int t = 0; t < 60 * 40; t++) g.update(1.f);
+        app.hideHud = false;
+        app.camX = 11 * tilesize; app.camY = 14 * tilesize;
+        app.cursorDX = 0; app.cursorDY = 0; app.configuring = -1;
+        app.cursorTX = 15; app.cursorTY = 12;
+        record(app, "water_steam");
+        app.cursorTX = 5; app.cursorTY = 15;
+        record(app, "water_pump");
+        app.hideHud = true;
+    }
     // palette of every category (bottom screen)
     {
         Game& g = app.game;

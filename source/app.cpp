@@ -81,6 +81,12 @@ static const UiString kUi[] = {
              "Stick : voler  Croix : curseur  A : poser  B : démolir\nY : miner  X : tourner  L/R : bloc  SELECT : catégorie"},
     {"power", "Power", "Énergie"},
     {"drawcpu", "draw", "dessin"},
+    {"saveunreadable", "Save unreadable: kept on the SD. X = new game (old file kept aside)",
+                       "Sauvegarde illisible : conservée sur la SD. X = nouvelle partie (ancien fichier mis de côté)"},
+    {"st.noliquid", "Missing", "Manque"},
+    {"st.liquidfull", "Tank full", "Réservoir plein"},
+    {"st.nofloor", "No liquid under the pump", "Aucun liquide sous la pompe"},
+    {"pumping", "pumping", "pompage"},
     {"maxlinks", "Too many links (max 10)", "Trop de liens (10 max.)"},
     {"st.active", "Active", "Actif"},
     {"st.nofuel", "No fuel", "Sans combustible"},
@@ -152,12 +158,28 @@ void App::saveCurrent() {
 }
 
 void App::startSector(int s, bool resume) {
+    std::string savePath = dataPath(std::string("sector-") + kSectors[s].name + ".sav");
+    std::vector<uint8_t> existing;
+    bool hasFile = readFile(savePath, existing);
     bool ok = false;
-    if (resume) {
-        std::vector<uint8_t> d;
-        if (readFile(dataPath(std::string("sector-") + kSectors[s].name + ".sav"), d)) ok = loadGame(game, d);
+    if (resume && hasFile) {
+        ok = loadGame(game, existing);
+        if (!ok) {
+            // never fall back to a fresh map here: the next autosave would overwrite the file
+            toast = lang.ui("saveunreadable"); toastTime = 300;
+            return;
+        }
     }
     if (!ok) {
+        if (hasFile) {
+            // new game over an existing save: keep the old file aside instead of overwriting it
+            Game probe;
+            bool readable = loadGame(probe, existing);
+            std::string aside = savePath + (readable ? ".prev" : ".unreadable-" + std::to_string(millis()));
+            std::remove(aside.c_str());
+            std::rename(savePath.c_str(), aside.c_str());
+            hasSave[s] = false;
+        }
         std::vector<uint8_t> d;
         if (!readFile(assetPath(std::string("maps/") + kSectors[s].name + ".m3d"), d) || !game.loadMap(d, s)) {
             toast = "map load failed"; toastTime = 240;
@@ -513,6 +535,47 @@ void App::drawBlock(int block, float sx, float sy, int rot, const Building* b, u
             gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
             gfx::sprite(d.sprTeam + (b ? std::min<int>(b->team, 2) : 1), sx, sy, 0, 1, 1, tint, blend);
             break;
+        case BType::Pump: {  // DrawDefault + DrawPumpLiquid (liquid region tinted, alpha = fill)
+            gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+            if (b && b->liquid >= 0 && b->liquidAmount > 0.001f)
+                gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, withAlpha((kLiquids[b->liquid].color << 8) | 0xff, b->liquidAmount / d.liquidCapacity), 1.f);
+            break;
+        }
+        case BType::Conduit: {  // Conduit.drawAt: bottom (botColor), liquid (smoothLiquid), top
+            int bits = b ? b->blendbits : 0;
+            float scx = b ? b->blendsclx : 1, scy = b ? b->blendscly : 1;
+            gfx::sprite(d.sprVar + bits, sx, sy, rot * 90.f, scx, scy, tint, blend);
+            if (b && b->liquid >= 0 && b->smoothLiquid > 0.01f) {
+                float h = tilesize * kZoom;  // fluid frame under the top region's window
+                gfx::rect(sx - h / 2, sy - h / 2, h, h, withAlpha((kLiquids[b->liquid].color << 8) | 0xff, b->smoothLiquid));
+            }
+            gfx::sprite(d.sprVar + 5 + bits, sx, sy, rot * 90.f, scx, scy, tint, blend);
+            break;
+        }
+        case BType::LiquidRouter: {  // LiquidRouter.draw: bottom, drawTiledFrames(alpha = fill), region
+            gfx::sprite(d.sprVar, sx, sy, 0, 1, 1, tint, blend);
+            if (b && b->liquid >= 0 && b->liquidAmount > 0.001f) {
+                float w = d.size * tilesize * kZoom;
+                gfx::rect(sx - w / 2, sy - w / 2, w, w, withAlpha((kLiquids[b->liquid].color << 8) | 0xff, b->liquidAmount / d.liquidCapacity));
+            }
+            gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+            break;
+        }
+        case BType::ConsumeGen:
+            if (d.sprRot >= 0) {  // steam generator DrawMulti
+                gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+                if (b && d.sprTop >= 0 && b->warmup > 0.01f) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, withAlpha(0xffffffff, b->warmup));
+                float tt = b ? b->totalProgress : 0;
+                gfx::sprite(d.sprRot, sx, sy, tt * 2.f, 1, 1, tint, blend);          // DrawRegion("-turbine"){rotateSpeed = 2}
+                gfx::sprite(d.sprRot, sx, sy, 45.f - tt * 2.f, 1, 1, tint, blend);   // {rotateSpeed = -2, rotation = 45}
+                if (d.sprExtra >= 0) gfx::sprite(d.sprExtra, sx, sy, 0, 1, 1, tint, blend);  // -cap
+                if (b && d.sprVar >= 0 && b->liquid >= 0 && b->liquidAmount > 0.001f)        // DrawLiquidRegion
+                    gfx::sprite(d.sprVar, sx, sy, 0, 1, 1, withAlpha((kLiquids[b->liquid].color << 8) | 0xff, b->liquidAmount / d.liquidCapacity), 1.f);
+                break;
+            }
+            gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+            if (b && d.sprTop >= 0 && !b->constructing && b->warmup > 0.01f) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, withAlpha(0xffffffff, b->warmup));
+            break;
         case BType::Wall: {
             int s = d.variants > 0 ? d.sprVar + (b ? (int)(hash2(b->tx, b->ty) % (uint32_t)d.variants) : 0) : d.spr;
             gfx::sprite(s, sx, sy, 0, 1, 1, tint, blend);
@@ -568,11 +631,16 @@ void App::drawInspect(const Building& b) {
         case Reason::Discharging: key = "st.discharging"; break;
         case Reason::BatteryFull: key = "st.full"; break;
         case Reason::BatteryEmpty: key = "st.empty"; break;
+        case Reason::MissingLiquid: key = "st.noliquid"; break;
+        case Reason::LiquidFull: key = "st.liquidfull"; break;
+        case Reason::NoLiquidFloor: key = "st.nofloor"; break;
         default: key = st.status == Status::Constructing ? "st.building" : "st.active"; break;
     }
     std::string label = lang.ui(key);
     if (st.reason == Reason::MissingItem && st.item >= 0) label += " : " + std::to_string((int)st.value) + " " + lang.itemName(st.item);
     if (st.reason == Reason::LowPower || st.status == Status::Constructing) label += " " + std::to_string((int)(st.value * 100)) + "%";
+    if (st.reason == Reason::MissingLiquid && st.item >= 0)
+        label += " " + lang.get(std::string("liquid.") + kLiquids[st.item].name + ".name", kLiquids[st.item].name) + " (" + std::to_string((int)(st.value * 100)) + "%)";
     gfx::rect(42, 186, 8, 8, led);
     gfx::text(54, 182, 0.4f, 0xffffffff, label.c_str());
     // detail line: contents, recipe or network balance
@@ -599,6 +667,22 @@ void App::drawInspect(const Building& b) {
         detail.clear();
         for (int i = 0; i < d.nconsumes; i++) detail += std::to_string(d.consumes[i].amount) + " " + lang.itemName(d.consumes[i].item) + (i + 1 < d.nconsumes ? " + " : "");
         if (d.output.item >= 0) detail += " -> " + lang.itemName(d.output.item);
+    }
+    if (d.hasLiquids && configuring != b.id) {
+        // liquid line: name, amount / capacity, pump rate (Pump stat: 60 * pumpAmount * tiles per second)
+        char t[96];
+        std::string lname = b.liquid >= 0 ? lang.get(std::string("liquid.") + kLiquids[b.liquid].name + ".name", kLiquids[b.liquid].name) : lang.ui("none");
+        std::snprintf(t, sizeof t, "%s %.1f/%.0f", lname.c_str(), b.liquidAmount, d.liquidCapacity);
+        std::string line = t;
+        if (d.type == BType::Pump && b.pumpDrop >= 0) {
+            std::snprintf(t, sizeof t, "  %s %.1f/s", lang.ui("pumping").c_str(), b.pumpTiles * d.pumpAmount * 60.f);
+            line += t;
+        }
+        if (d.type == BType::ConsumeGen) {
+            std::snprintf(t, sizeof t, "  +%.0f/s", d.powerProduction * b.productionEfficiency * 60.f);
+            line += t;
+        }
+        detail = detail.empty() ? line : line + "   " + detail;
     }
     if (!detail.empty()) gfx::text(42, 196, 0.36f, kGray, detail.c_str());
     // contents (items held), right aligned, 16 px icons

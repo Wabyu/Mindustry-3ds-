@@ -432,6 +432,121 @@ static void testPowerConfigAndStatus() {
     CHECK(m.toggleBridgeLink(b1, b2) && m.builds[b1].link < 0, "tapping the linked bridge again unlinks");
 }
 
+// ---------------------------------------------------------------- liquids (Pump / Conduit / LiquidRouter / steam)
+static double liquidInWorld(Game& g) {
+    double v = 0;
+    for (auto& b : g.builds) if (b.alive && b.liquid >= 0) v += b.liquidAmount;
+    return v;
+}
+
+static void liquidMap(Game& g, int w, int h) {
+    emptyMap(g, w, h); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, w - 3, h - 3, TeamSharded, 0);
+}
+
+static void testLiquids() {
+    Game g; liquidMap(g, 40, 20);
+    g.tile(2, 5)->floor = B_shallow_water;
+    g.tile(2, 10)->floor = B_deep_water;
+    CHECK(!g.validPlace(B_mechanical_pump, 5, 5, 0, TeamSharded), "pump refused on stone (Pump.canPlaceOn)");
+    CHECK(g.validPlace(B_mechanical_pump, 2, 5, 0, TeamSharded), "pump allowed on shallow water");
+    CHECK(g.validPlace(B_mechanical_pump, 2, 10, 0, TeamSharded) && g.validPlace(B_conduit, 2, 10, 0, TeamSharded),
+          "pump and conduit allowed on deep water (floating)");
+    CHECK(!g.validPlace(B_combustion_generator, 2, 10, 0, TeamSharded), "non-floating block refused on deep water");
+    int p1 = g.addBuilding(B_mechanical_pump, 2, 5, TeamSharded, 0);
+    int p2 = g.addBuilding(B_mechanical_pump, 2, 10, TeamSharded, 0);
+    g.update(1.f);
+    // pumpAmount 7/60 per tick * liquidMultiplier (shallow 1, deep 1.5)
+    CHECK(std::fabs(g.builds[p1].liquidAmount - 7.f / 60.f) < 1e-4f && std::fabs(g.builds[p2].liquidAmount - 1.5f * 7.f / 60.f) < 1e-4f,
+          "pump rate %.4f (shallow) / %.4f (deep) per tick", g.builds[p1].liquidAmount, g.builds[p2].liquidAmount);
+    // saturation: no outlet -> stops at liquidCapacity 10, status "tank full", pumping stops
+    for (int i = 0; i < 200; i++) g.update(1.f);
+    double pumped = g.liquidPumped;
+    for (int i = 0; i < 60; i++) g.update(1.f);
+    CHECK(std::fabs(g.builds[p1].liquidAmount - 10.f) < 0.02f && g.liquidPumped - pumped < 0.05 &&
+          g.status(g.builds[p1]).reason == Reason::LiquidFull, "isolated pump saturates at 10 and stops");
+
+    // transfer: pump -> 8 conduits -> tank, ending against a wall (no leak); volume conserved
+    Game h; liquidMap(h, 40, 20);
+    h.tile(2, 8)->floor = B_shallow_water;
+    h.addBuilding(B_mechanical_pump, 2, 8, TeamSharded, 0);
+    for (int x = 3; x <= 10; x++) h.addBuilding(B_conduit, x, 8, TeamSharded, 0);
+    int tank = h.addBuilding(B_liquid_tank, 12, 8, TeamSharded, 0);
+    for (int i = 0; i < 60 * 60; i++) h.update(1.f);
+    double inWorld = liquidInWorld(h);
+    CHECK(h.builds[tank].liquidAmount > 300.f, "tank received %.1f water in 60 s through 8 conduits", h.builds[tank].liquidAmount);
+    CHECK(std::fabs(h.liquidPumped - (inWorld + h.liquidLeaked + h.liquidConsumed)) < 1e-4 * h.liquidPumped && h.liquidLeaked == 0,  // float32 amounts
+          "volume conserved: pumped %.3f = stored %.3f (no leak, no consumer)", h.liquidPumped, inWorld);
+    CHECK(h.buildAt(5, 8)->blendbits == 0 && h.buildAt(3, 8)->liquid == L_water, "conduits straight and carrying water");
+    // conduit refuses liquid from the tile it flows into
+    Building* c5 = h.buildAt(5, 8); Building* c6 = h.buildAt(6, 8);
+    CHECK(!h.acceptLiquid(*c5, *c6, L_water) && h.acceptLiquid(*c6, *c5, L_water), "conduit does not accept from its front");
+    // open end: Conduit leaks (puddles not ported, counted as leaked)
+    Game k; liquidMap(k, 40, 20);
+    k.tile(2, 8)->floor = B_shallow_water;
+    k.addBuilding(B_mechanical_pump, 2, 8, TeamSharded, 0);
+    for (int x = 3; x <= 6; x++) k.addBuilding(B_conduit, x, 8, TeamSharded, 0);
+    for (int i = 0; i < 600; i++) k.update(1.f);
+    CHECK(k.liquidLeaked > 1 && std::fabs(k.liquidPumped - (liquidInWorld(k) + k.liquidLeaked)) < 1e-2,
+          "open conduit end leaks %.2f, balance kept", k.liquidLeaked);
+
+    // steam generator: 5.5/tick with coal (flammability 1) and 0.1 water/tick
+    Game s; liquidMap(s, 40, 20);
+    s.tile(2, 8)->floor = B_shallow_water;
+    int pump = s.addBuilding(B_mechanical_pump, 2, 8, TeamSharded, 0);
+    for (int x = 3; x <= 5; x++) s.addBuilding(B_conduit, x, 8, TeamSharded, 0);
+    int steam = s.addBuilding(B_steam_generator, 6, 8, TeamSharded, 0);  // tiles 6..7 x 8..9
+    s.builds[steam].items.add(I_coal, 10);
+    for (int i = 0; i < 300; i++) s.update(1.f);
+    Building& sg = s.builds[steam];
+    CHECK(sg.productionEfficiency > 0.99f && s.status(sg).status == Status::Active,
+          "steam generator running: %.0f power/s", sg.productionEfficiency * 5.5f * 60.f);
+    CHECK(s.liquidConsumed > 0 && std::fabs(s.liquidPumped - (liquidInWorld(s) + s.liquidLeaked + s.liquidConsumed)) < 1e-2,
+          "steam consumed %.2f water, balance kept", s.liquidConsumed);
+    // no water: remove the pump, the generator drains then stops
+    s.removeBuilding(pump, false);
+    for (int i = 0; i < 600; i++) s.update(1.f);
+    StatusInfo st = s.status(s.builds[steam]);
+    CHECK(st.reason == Reason::MissingLiquid && s.builds[steam].productionEfficiency < 0.01f, "without water: stopped, reason missing water");
+    // no fuel, water present
+    Game f; liquidMap(f, 40, 20);
+    f.tile(2, 8)->floor = B_shallow_water;
+    f.addBuilding(B_mechanical_pump, 2, 8, TeamSharded, 0);
+    f.addBuilding(B_conduit, 3, 8, TeamSharded, 0);
+    int st2 = f.addBuilding(B_steam_generator, 4, 8, TeamSharded, 0);
+    for (int i = 0; i < 120; i++) f.update(1.f);
+    CHECK(f.status(f.builds[st2]).reason == Reason::NoFuel && f.builds[st2].liquidAmount > 1.f && f.liquidConsumed == 0,
+          "without coal: no fuel, water stored (%.1f) but not consumed", f.builds[st2].liquidAmount);
+
+    // save / reload keeps liquids (format 2)
+    auto bytes = saveGame(h);
+    Game r;
+    bool ok = loadGame(r, bytes);
+    CHECK(ok && std::fabs(liquidInWorld(r) - liquidInWorld(h)) < 1e-3 && r.buildAt(12, 8)->liquid == L_water,
+          "save/reload keeps %.1f water", liquidInWorld(r));
+    for (int i = 0; i < 60; i++) r.update(1.f);
+    CHECK(r.buildAt(12, 8)->liquidAmount > h.builds[tank].liquidAmount, "reloaded chain keeps pumping into the tank");
+    std::vector<uint8_t> bad = bytes; bad.resize(bad.size() / 2);
+    Game untouched; untouched.width = 7;
+    CHECK(!loadGame(untouched, bad) && untouched.width == 7, "truncated save refused without touching the game");
+}
+
+static void testLegacySaveV1() {
+    std::ifstream f("tests/fixtures/save_v1_0.2.sav", std::ios::binary);
+    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    Game g;
+    bool ok = !d.empty() && loadGame(g, d);
+    CHECK(ok, "0.2 save (format 1, %zu bytes) still loads", d.size());
+    if (!ok) return;
+    Building* c = g.core(TeamSharded);
+    CHECK(c && c->items.amount[I_copper] == 321 && c->items.amount[I_lead] == 45, "0.2 save: core items restored by block name remap");
+    CHECK(g.buildAt(3, 3) && g.buildAt(3, 3)->block == B_mechanical_drill && g.buildAt(15, 8)->block == B_duo &&
+          g.buildAt(12, 12)->block == B_battery && g.tile(10, 15)->env == B_snow_wall, "0.2 save: blocks and walls mapped to the new ids");
+    auto again = saveGame(g);
+    Game h;
+    CHECK(loadGame(h, again) && h.core(TeamSharded)->items.amount[I_copper] == 321, "0.2 save re-saved as format 2 and reloaded");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) romfs = argv[1];
     testDrillToCore();
@@ -448,6 +563,8 @@ int main(int argc, char** argv) {
     testConveyorClogAndResume();
     testConveyorEditing();
     testPowerConfigAndStatus();
+    testLiquids();
+    testLegacySaveV1();
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "OK", failures);
     return failures ? 1 : 0;
 }

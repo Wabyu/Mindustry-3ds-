@@ -10,6 +10,8 @@ Ce dépôt prend la suite de Forge3DS 1.4.6. Forge3DS était une réimplémentat
 
 *Captures produites sur PC par `tests/screenshot.cpp`. Ce sont les vraies commandes de dessin du jeu, composées avec les sprites générés. Seule la police diffère de celle de la console.*
 
+**Nouveautés 0.3** : eau, pompe mécanique, conduites, réservoir et générateur à vapeur selon les règles v146 ; sauvegardes au format 2, avec lecture des sauvegardes 0.2 ([docs/LIQUIDES_0.3.md](docs/LIQUIDES_0.3.md)).
+
 **Nouveautés 0.2** : correction des artefacts visuels (sprites en miroir décalés par citro2d, halos de réduction, alignement au pixel, bordures d'atlas), icônes composites officielles, convoyeurs fidèles à `Conveyor`/`Autotiler` (raccords, animation, aperçu des virages), configuration des nœuds et ponts, états des machines et bilan électrique, panneaux solaires, pulvérisateur et mélangeurs, mesure FPS dans le menu pause. Détails et preuves : [docs/AMELIORATIONS_0.2.md](docs/AMELIORATIONS_0.2.md) ; inventaire Forge3DS : [docs/FORGE3DS_INVENTAIRE.md](docs/FORGE3DS_INVENTAIRE.md).
 
 ## Ce qui vient de Mindustry original
@@ -43,7 +45,7 @@ Il n'existe pas de JVM pour la 3DS, et le jeu de bureau dépasse de loin les 64 
 
 ## Ce qui n'est pas encore porté
 
-Liquides et pompes (donc générateur à vapeur), usines d'unités et reconstructeurs, arbre de recherche et lancement entre secteurs, processeurs logiques (les processeurs de Ground Zero sont ignorés : le minuteur des vagues démarre directement), météo, brouillard, effets de statut, bonus d'eau des foreuses, Erekir. Les blocs non portés présents sur les cartes sont retirés au chargement (la liste figure dans `build/gen/assets_report.json`). Les sauvegardes utilisent un format propre au portage et ne sont pas compatibles avec les `.msav` de Mindustry.
+Liquides autres que l'eau, jonctions et ponts liquides, usines d'unités et reconstructeurs, arbre de recherche et lancement entre secteurs, processeurs logiques (les processeurs de Ground Zero sont ignorés : le minuteur des vagues démarre directement), météo, brouillard, effets de statut, bonus d'eau des foreuses, Erekir. Les blocs non portés présents sur les cartes sont retirés au chargement (la liste figure dans `build/gen/assets_report.json`). Les sauvegardes utilisent un format propre au portage et ne sont pas compatibles avec les `.msav` de Mindustry.
 
 ## Commandes
 
@@ -96,10 +98,10 @@ cia/                 RSF, bannière, son
 
 ## État de validation
 
-- 88 vérifications hôte passent : débits, recettes, énergie (liens, plafond de 10, états, batteries), convoyeurs (4 directions, 28 cas de raccord, fusions, jonction, titane, embouteillage, rotation et amélioration sans perte), combat, construction, 5 cartes officielles et sauvegardes.
+- 110 vérifications hôte passent (dont pompage, transfert, saturation, conservation, vapeur, lecture d'une sauvegarde 0.2) : débits, recettes, énergie (liens, plafond de 10, états, batteries), convoyeurs (4 directions, 28 cas de raccord, fusions, jonction, titane, embouteillage, rotation et amélioration sans perte), combat, construction, 5 cartes officielles et sauvegardes.
 - Scènes de contrôle visuel : 0 sprite à 0°/90° posé entre deux pixels, 0 texel lu hors de son sprite, panoramiques lents et diagonaux identiques au pixel près. Ce sont des compositions hôte des appels citro2d, pas des captures de la console.
 - Le `.3dsx` et le `.cia` compilent pour ARM11 (`-march=armv6k`). Le CIA passe une vérification statique : NCCH, exheader, mode 64 Mo, priorité et pile.
-- La version 0.1 démarre et tourne de façon fluide sur une Old 3DS XL réelle (retour qualitatif). **La 0.2 reste à essayer sur console**, avec relevé des FPS du menu pause.
+- La version 0.1 démarre et tourne de façon fluide sur une Old 3DS XL réelle (retour qualitatif). **La 0.3 reste à essayer sur console**, avec relevé des FPS du menu pause.
 
 ## Licence
 

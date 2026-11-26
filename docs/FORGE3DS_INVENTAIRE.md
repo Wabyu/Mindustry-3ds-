@@ -11,7 +11,7 @@ Légende : **présent** · **partiel** · **absent** · **adaptation nécessaire
 |---|---|---|
 | Générateur à combustion | présent | `ConsumeGenerator` + `ConsumeItemFlammable` |
 | Panneau solaire | présent | `SolarGenerator`, 0,1/tick ; grand panneau ajouté |
-| Générateur à vapeur (charbon + eau) | absent | exige les liquides (lot à venir) |
+| Générateur à vapeur (charbon + eau) | présent | 0.3, `ConsumeGenerator` + `ConsumeLiquid` |
 | Batterie | présent | charge selon la place libre, décharge selon le stock (`PowerGraph`) |
 | Nœuds : liens automatiques à la pose | présent | `PowerNode.getNodeLinks` / `getPotentialLinks` |
 | Nœuds : 10 liens configurables | présent | `PowerNode.configure` ; le double appui lie automatiquement ou délie tout |
@@ -26,7 +26,8 @@ Légende : **présent** · **partiel** · **absent** · **adaptation nécessaire
 
 | Fonctionnalité Forge3DS | État | Détail |
 |---|---|---|
-| Pompes, conduites, eau, pétrole, cryofluide, laitier | absent | aucun module liquide pour l'instant |
+| Pompe mécanique, conduites, réservoir, eau | présent | 0.3, voir `LIQUIDES_0.3.md` |
+| Pétrole, cryofluide, laitier, jonction/pont liquides | absent | structure prête (`LIQUIDS`), contenu non ajouté |
 | Presse à graphite, fonderie de silicium, four à verre | présent | |
 | Pulvérisateur, mélangeur de pyratite, mélangeur d'explosif | présent | ajoutés dans la 0.2 (objets et énergie uniquement) |
 | Cultivateur, presse à spores, plastanium, centrifugeuse, cryofluide, tissu phasé, alliage, fondeur, séparateur | absent | dépendent des liquides ou de blocs non portés |

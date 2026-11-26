@@ -163,7 +163,7 @@ bool Game::validPlace(int16_t block, int tx, int ty, uint8_t rotation, uint8_t t
             Tile* t = tile(x, y);
             if (!t) return false;
             if (t->env && kBlocks[t->env].type == BType::StaticWall) return false;
-            if (kBlocks[t->floor].isDeep) return false;
+            if (kBlocks[t->floor].isDeep && !d.floating) return false;  // Build.validPlace: deep water unless floating
             if (t->build >= 0) {
                 Building& o = builds[t->build];
                 // replacing a conveyor with another of the same size (rotation change / upgrade)
@@ -177,6 +177,7 @@ bool Game::validPlace(int16_t block, int tx, int ty, uint8_t rotation, uint8_t t
             }
         }
     if (d.type == BType::Drill && !ore) return false;
+    if (d.type == BType::Pump && !pumpPlaceValid(block, tx, ty)) return false;
     return true;
 }
 
@@ -370,12 +371,67 @@ void Game::updateProximity(int32_t idx) {
     if (b.cdump >= (int)b.proximity.size()) b.cdump = 0;
     b.sleeping = false;
 
+    if (b.def().type == BType::Conduit) liquidTiling(b);
+    if (b.def().type == BType::Pump) {
+        // Pump.onProximityUpdate: liquidDrop and sum of liquidMultiplier of the pumpable tiles
+        b.pumpDrop = -1; b.pumpTiles = 0;
+        for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++) {
+                Tile* t = tile(x, y);
+                if (t && kBlocks[t->floor].liquidDrop >= 0) { b.pumpDrop = kBlocks[t->floor].liquidDrop; b.pumpTiles += kBlocks[t->floor].liquidMultiplier; }
+            }
+    }
     if (b.def().type == BType::Conveyor) {
         Building* n = buildAt(b.tx + d4x[b.rotation], b.ty + d4y[b.rotation]);
         int ni = buildIndexAt(b.tx + d4x[b.rotation], b.ty + d4y[b.rotation]);
         b.next = (n && n->team == b.team && !n->constructing) ? ni : -1;
         b.aligned = b.next >= 0 && n->def().type == BType::Conveyor && n->rotation == b.rotation;
         conveyorTiling(b.tx, b.ty, b.rotation, b.team, false, b.blendbits, b.blendsclx, b.blendscly, b.blending);
+    }
+}
+
+// Pump.canPlaceOn: every pumpable tile must give the same liquid, and at least one must
+bool Game::pumpPlaceValid(int16_t block, int tx, int ty) {
+    int x0, y0, x1, y1;
+    linkedTiles(block, tx, ty, x0, y0, x1, y1);
+    int last = -1;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            Tile* t = tile(x, y);
+            if (!t) return false;
+            int drop = kBlocks[t->floor].liquidDrop;
+            if (drop < 0) continue;
+            if (last >= 0 && drop != last) return false;
+            last = drop;
+        }
+    return last >= 0;
+}
+
+// Conduit: Autotiler with Conduit.blends = hasLiquids && (outputsLiquid || lookingAt) && lookingAtEither
+void Game::liquidTiling(Building& b) {
+    auto blends = [&](int direction) {
+        int dir = ((b.rotation - direction) % 4 + 4) % 4;
+        Building* o = buildAt(b.tx + d4x[dir], b.ty + d4y[dir]);
+        if (!o || o->team != b.team || o->constructing || !o->def().hasLiquids) return false;
+        int fx = b.tx + d4x[b.rotation], fy = b.ty + d4y[b.rotation];
+        int ox0, oy0, ox1, oy1;
+        linkedTiles(o->block, o->tx, o->ty, ox0, oy0, ox1, oy1);
+        bool lookingAt = fx >= ox0 && fx <= ox1 && fy >= oy0 && fy <= oy1;
+        if (!(o->def().outputsLiquid || lookingAt)) return false;
+        if (lookingAt || !o->def().rotate) return true;
+        return o->tx + d4x[o->rotation] == b.tx && o->ty + d4y[o->rotation] == b.ty;
+    };
+    bool l = blends(1), back = blends(2), r = blends(3);
+    int num = (back && l && r) ? 0 : (l && r) ? 1 : (l && back) ? 2 : (r && back) ? 3 : l ? 4 : r ? 5 : -1;
+    b.blendbits = 0; b.blendsclx = 1; b.blendscly = 1; b.blending = 0;
+    switch (num) {
+        case 0: b.blendbits = 3; break;
+        case 1: b.blendbits = 4; break;
+        case 2: b.blendbits = 2; break;
+        case 3: b.blendbits = 2; b.blendscly = -1; break;
+        case 4: b.blendbits = 1; b.blendscly = -1; break;
+        case 5: b.blendbits = 1; break;
+        default: break;
     }
 }
 

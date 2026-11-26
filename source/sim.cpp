@@ -211,23 +211,151 @@ static void updateCrafter(Game& g, Building& b, float delta) {
 }
 
 static void updateGenerator(Game& g, Building& b, float delta) {
-    (void)g;
-    // ConsumeGenerator + ConsumeItemFlammable
+    // ConsumeGenerator + ConsumeItemFlammable (+ ConsumeLiquid for the steam generator)
     const BlockDef& d = b.def();
     int fuel = -1; float best = -1;
     for (int i = 0; i < ITEM_COUNT; i++)
         if (b.items.has(i) && kItems[i].flammability >= 0.2f && kItems[i].flammability > best) { best = kItems[i].flammability; fuel = i; }
     float eff = fuel >= 0 ? 1.f : 0.f;
     float mult = fuel >= 0 ? kItems[fuel].flammability : 0.f;
+    if (d.consumeLiquid >= 0) {
+        // ConsumeLiquid.efficiency: min(stored / (amount * delta), 1), computed with efficiency = 1
+        float have = b.liquid == d.consumeLiquid ? b.liquidAmount : 0.f;
+        eff = std::fmin(eff, std::fmin(have / (d.consumeLiquidAmount * delta), 1.f));
+    }
+    b.efficiency = eff;
     bool valid = eff > 0;
     b.warmup = approach(b.warmup, valid ? 1.f : 0.f, 0.05f * delta);
     b.productionEfficiency = eff * mult;
+    if (valid && d.consumeLiquid >= 0) {
+        // ConsumeLiquid.update: remove amount * edelta
+        float used = std::fmin(b.liquidAmount, d.consumeLiquidAmount * eff * delta);
+        b.liquidAmount -= used;
+        g.liquidConsumed += used;
+        if (b.liquidAmount <= 0) { b.liquidAmount = 0; }
+    }
+    b.totalProgress += b.warmup * delta;  // turbine rotation (totalTime)
     if (valid && b.generateTime <= 0.f) {
         b.items.remove(fuel, 1);
         b.generateTime = 1.f;
     }
     b.generateTime -= delta / d.itemDuration;
     if (b.generateTime < 0) b.generateTime = 0;
+}
+
+// ---------------------------------------------------------------- liquids
+static const int ld4x[4] = {1, 0, -1, 0};
+static const int ld4y[4] = {0, 1, 0, -1};
+
+bool Game::acceptLiquid(const Building& b, const Building& source, int liquid) const {
+    const BlockDef& d = b.def();
+    if (b.constructing || !d.hasLiquids || b.team != source.team) return false;
+    bool sameOrEmpty = b.liquid == liquid || b.liquidAmount < 0.2f;  // liquids.current() == liquid || currentAmount() < 0.2
+    switch (d.type) {
+        case BType::Conduit:
+            // ...and not from the tile it flows into
+            return sameOrEmpty && (&source == &b || (relativeTo(source, b) + 2) % 4 != b.rotation);
+        case BType::LiquidRouter:
+            return sameOrEmpty;
+        default:
+            return d.consumeLiquid == liquid;  // Building.acceptLiquid: consumesLiquid(liquid)
+    }
+}
+
+void Game::handleLiquid(Building& b, int liquid, float amount) {
+    if (b.liquid != liquid) {
+        // single-liquid module: an accepted different liquid replaces a near-empty one (< 0.2)
+        if (b.liquidAmount > 0) liquidLeaked += b.liquidAmount;
+        b.liquid = (int16_t)liquid; b.liquidAmount = 0;
+    }
+    b.liquidAmount += amount;
+}
+
+// Building.moveLiquid
+float Game::moveLiquid(Building& b, Building* next, int liquid) {
+    if (!next || b.liquid != liquid) return 0;
+    const BlockDef& d = b.def();
+    const BlockDef& nd = next->def();
+    if (next->team != b.team || !nd.hasLiquids || b.liquidAmount <= 0) return 0;
+    float nextAmount = next->liquid == liquid ? next->liquidAmount : 0.f;
+    float ofract = nextAmount / nd.liquidCapacity;
+    float fract = b.liquidAmount / d.liquidCapacity * d.liquidPressure;
+    float flow = std::fmin(std::clamp(fract - ofract, 0.f, 1.f) * d.liquidCapacity, b.liquidAmount);
+    flow = std::fmin(flow, nd.liquidCapacity - nextAmount);
+    if (flow > 0 && ofract <= fract && acceptLiquid(*next, b, liquid)) {
+        handleLiquid(*next, liquid, flow);
+        b.liquidAmount -= flow;
+        return flow;
+    }
+    return 0;
+}
+
+// Building.dumpLiquid(liquid, scaling)
+void Game::dumpLiquid(Building& b, int liquid, float scaling) {
+    if (b.liquid != liquid || b.liquidAmount <= 0.0001f) return;
+    int n = (int)b.proximity.size();
+    int dmp = b.cdump;
+    for (int i = 0; i < n; i++) {
+        b.cdump = (b.cdump + 1) % n;
+        Building& other = builds[b.proximity[(i + dmp) % n]];
+        const BlockDef& od = other.def();
+        if (!od.hasLiquids || other.team != b.team) continue;
+        float otherAmount = other.liquid == liquid ? other.liquidAmount : 0.f;
+        float ofract = otherAmount / od.liquidCapacity;
+        float fract = b.liquidAmount / b.def().liquidCapacity;
+        if (ofract < fract) {
+            // transferLiquid
+            float amount = (fract - ofract) * b.def().liquidCapacity / scaling;
+            float flow = std::fmin(od.liquidCapacity - otherAmount, amount);
+            flow = std::fmin(flow, b.liquidAmount);
+            if (flow > 0 && acceptLiquid(other, b, liquid)) {
+                handleLiquid(other, liquid, flow);
+                b.liquidAmount -= flow;
+            }
+        }
+    }
+}
+
+// Building.moveLiquidForward(leaks = true for conduits)
+void Game::moveLiquidForward(Building& b) {
+    int nx = b.tx + ld4x[b.rotation], ny = b.ty + ld4y[b.rotation];
+    Tile* t = tile(nx, ny);
+    if (!t) return;
+    if (t->build >= 0) { moveLiquid(b, &builds[t->build], b.liquid); return; }
+    bool solidTile = t->env && kBlocks[t->env].type == BType::StaticWall;
+    if (!solidTile) {
+        // Puddles.deposit: puddles are not ported, the leaked amount is lost
+        float leak = b.liquidAmount / 1.5f;
+        b.liquidAmount -= leak;
+        liquidLeaked += leak;
+    }
+}
+
+static void updateLiquidBlock(Game& g, Building& b, float delta) {
+    const BlockDef& d = b.def();
+    b.smoothLiquid = lerp(b.smoothLiquid, d.liquidCapacity > 0 ? b.liquidAmount / d.liquidCapacity : 0.f, std::fmin(1.f, 0.05f * delta));
+    switch (d.type) {
+        case BType::Pump:
+            // Pump.updateTile: shouldConsume (not full) -> efficiency; pump amount * pumpAmount * edelta
+            if (b.pumpDrop >= 0 && (b.liquid == b.pumpDrop || b.liquid < 0 || b.liquidAmount < 0.2f)) {
+                if (b.liquid != b.pumpDrop) { b.liquid = b.pumpDrop; b.liquidAmount = 0; }
+                bool should = b.liquidAmount < d.liquidCapacity - 0.01f;
+                float maxPump = should ? std::fmin(d.liquidCapacity - b.liquidAmount, b.pumpTiles * d.pumpAmount * delta) : 0.f;
+                b.liquidAmount += maxPump;
+                g.liquidPumped += maxPump;
+                b.warmup = approach(b.warmup, maxPump > 0.001f ? 1.f : 0.f, 0.019f * delta);
+                g.dumpLiquid(b, b.pumpDrop);
+            }
+            break;
+        case BType::Conduit:
+            if (b.liquidAmount > 0.0001f) g.moveLiquidForward(b);
+            break;
+        case BType::LiquidRouter:
+            if (b.liquidAmount > 0.0001f) g.dumpLiquid(b, b.liquid);
+            break;
+        default:
+            break;
+    }
 }
 
 static int peekAmmo(const Building& b) { return b.ammo.empty() ? -1 : b.ammo.back().item; }
@@ -304,6 +432,9 @@ void Game::updateBuilding(int32_t idx, float delta) {
         case BType::Crafter: updateCrafter(*this, b, delta); break;
         case BType::ConsumeGen: updateGenerator(*this, b, delta); break;
         case BType::ItemTurret: updateTurret(*this, b, idx, delta); break;
+        case BType::Pump: case BType::Conduit: case BType::LiquidRouter:
+            updateLiquidBlock(*this, b, delta);
+            break;
         case BType::Solar:
             // SolarGenerator.updateTile: solarMultiplier * (lighting ? 1 - ambientLight.a : 1);
             // the ported sectors have no lighting rule, so efficiency is 1
@@ -573,13 +704,19 @@ StatusInfo Game::status(const Building& b) const {
         case BType::ConsumeGen: {
             bool fuel = false;
             for (int i = 0; i < ITEM_COUNT; i++) if (b.items.has(i) && kItems[i].flammability >= 0.2f) fuel = true;
-            if (!fuel && b.generateTime <= 0) return {Status::NoInput, Reason::NoFuel, -1, 0};
+            if (!fuel) return {Status::NoInput, Reason::NoFuel, -1, 0};
+            if (d.consumeLiquid >= 0 && b.efficiency < 0.999f)
+                return {Status::NoInput, Reason::MissingLiquid, d.consumeLiquid, b.efficiency};
             return {Status::Active, Reason::None, -1, b.productionEfficiency};
         }
         case BType::Drill:
             if (b.dominantItems == 0 || b.dominantItem < 0) return {Status::NoInput, Reason::NoOre, -1, 0};
             if (b.items.total >= d.itemCapacity) return {Status::NoOutput, Reason::OutputFull, b.dominantItem, 0};
             return {Status::Active, Reason::None, b.dominantItem, 0};
+        case BType::Pump:
+            if (b.pumpDrop < 0) return {Status::NoInput, Reason::NoLiquidFloor, -1, 0};
+            if (b.liquidAmount >= d.liquidCapacity - 0.01f) return {Status::NoOutput, Reason::LiquidFull, b.pumpDrop, 0};
+            return {Status::Active, Reason::None, b.pumpDrop, b.pumpTiles * d.pumpAmount};
         case BType::ItemTurret:
             if (b.ammo.empty()) return {Status::NoInput, Reason::NoAmmo, -1, 0};
             return s;

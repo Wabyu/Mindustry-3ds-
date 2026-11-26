@@ -114,7 +114,8 @@ _num = re.compile(r"(?<![\w.])(\d+\.\d*|\.\d+|\d+)([fFdDlL])\b")
 
 
 def java_to_py(expr):
-    e = _num.sub(r"\1", expr.strip())
+    # keep Java float literals floating point: 7f / 60f must not become integer division
+    e = _num.sub(lambda m: m.group(1) + (".0" if m.group(2) in "fFdD" and "." not in m.group(1) else ""), expr.strip())
     e = re.sub(r"\btrue\b", "True", e)
     e = re.sub(r"\bfalse\b", "False", e)
     e = re.sub(r"\(\s*(float|int|double)\s*\)", "", e)  # casts

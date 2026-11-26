@@ -12,7 +12,8 @@ enum class BType : uint8_t {
     Conveyor, Junction, Router, Sorter, OverflowGate, Bridge,
     Drill, Crafter, ConsumeGen, PowerNode, Battery,
     ItemTurret, Wall, Core, Storage,
-    Solar  // SolarGenerator
+    Solar,  // SolarGenerator
+    Pump, Conduit, LiquidRouter  // liquids
 };
 
 // mindustry.type.Category order
@@ -61,6 +62,18 @@ struct BlockDef {
     AmmoDef ammo[3]; int nammo;
     int16_t sprIcon;  // composite of Block.icons(), 32x32 UI size; sprIcon + 1 = 16x16
     bool squareSprite;  // Block.squareSprite (Generators: no pixel below 90% alpha)
+    // liquids
+    float liquidCapacity, pumpAmount;
+    int16_t consumeLiquid; float consumeLiquidAmount;  // ConsumeLiquid (per tick)
+    int16_t liquidDrop; float liquidMultiplier;        // Floor
+    bool floating, outputsLiquid, hasLiquids;
+    float liquidPressure;
+};
+
+struct LiquidDef {
+    const char* name;
+    uint32_t color;
+    float flammability, temperature;
 };
 
 struct ItemDef {
@@ -102,5 +115,6 @@ extern const BlockDef kBlocks[];
 extern const unsigned char kBlockTier[];
 extern const UnitDef kUnits[];
 extern const SectorDef kSectors[];
+extern const LiquidDef kLiquids[];
 
 }  // namespace mdt

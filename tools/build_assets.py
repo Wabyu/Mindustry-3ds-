@@ -43,8 +43,10 @@ BUILDABLE = {
     "itemBridge": "Bridge",
     "mechanicalDrill": "Drill", "pneumaticDrill": "Drill",
     "graphitePress": "Crafter", "siliconSmelter": "Crafter", "kiln": "Crafter",
+    "pulverizer": "Crafter", "pyratiteMixer": "Crafter", "blastMixer": "Crafter",
     "combustionGenerator": "ConsumeGen",
     "powerNode": "PowerNode", "battery": "Battery",
+    "solarPanel": "Solar", "largeSolarPanel": "Solar",
     "duo": "ItemTurret", "scatter": "ItemTurret", "hail": "ItemTurret",
     "copperWall": "Wall", "copperWallLarge": "Wall",
     "titaniumWall": "Wall", "titaniumWallLarge": "Wall",
@@ -128,12 +130,32 @@ class Sprites:
         img = Image.open(path).convert("RGBA")
         if outline:
             img = add_outline(img, (0x40, 0x40, 0x49, 255), 3)
-        w = max(1, round(img.width * SCALE)); h = max(1, round(img.height * SCALE))
-        img = img.resize((w, h), Image.LANCZOS)
+        return self.add_image(key, downscale(img, 2))
+
+    def add_derived(self, key, name, fn, outline=False):
+        """Full-resolution upstream sprite -> fn(img) -> downscaled sprite."""
+        if key in self.index:
+            return self.index[key]
+        img = Image.open(self.up.sprite(name)).convert("RGBA")
+        if outline:
+            img = add_outline(img, (0x40, 0x40, 0x49, 255), 3)
+        return self.add_image(key, downscale(fn(img), 2))
+
+    def add_image(self, key, img):
+        if key in self.index:
+            return self.index[key]
         self.index[key] = len(self.names)
         self.names.append(key)
         self.images.append(img)
         return self.index[key]
+
+    def add_icon(self, key, layers, size):
+        """Composite icon like tools/Generators.java (block-<name>-full) from Block.icons()
+        layers, reduced to the 32x32 UI size by an integer box filter."""
+        canvas = compose_icon(self.up, layers, size)
+        big = self.add_image("icon-" + key, downscale(canvas, size))
+        self.add_image("icon-small-" + key, downscale(canvas, size * 2))  # always big + 1
+        return big
 
     def get(self, name):
         return self.index.get(name, -1)
@@ -159,7 +181,7 @@ class Sprites:
             sheets.append(cur)
         refs = [None] * len(self.images)
         for s, members in enumerate(sheets):
-            lines = ["--atlas -f rgba8888 -z auto"]
+            lines = ["--atlas -f rgba8888 -z auto --border edge"]  # 1 px colour-matched border: no bleeding between packed sprites
             for local, i in enumerate(members):
                 fn = "sprites/%04d_%s.png" % (i, ident(self.names[i]))
                 self.images[i].save(os.path.join(gfx_dir, fn))
@@ -169,6 +191,36 @@ class Sprites:
                 f.write("\n".join(lines) + "\n")
         self.refs = refs
         self.sheet_count = len(sheets)
+
+
+def downscale(img, factor):
+    """Exact box filter in premultiplied alpha. Unlike LANCZOS it cannot create colours
+    outside the range of the source pixels (no halos/ringing on pixel art)."""
+    if factor == 1:
+        return img
+    import numpy as np
+    w = (img.width + factor - 1) // factor * factor
+    h = (img.height + factor - 1) // factor * factor
+    if (w, h) != img.size:  # pad symmetrically to a multiple of the factor
+        pad = Image.new("RGBA", (w, h))
+        pad.paste(img, ((w - img.width) // 2, (h - img.height) // 2))
+        img = pad
+    a = np.asarray(img).astype(np.float64) / 255
+    rgb, al = a[..., :3] * a[..., 3:4], a[..., 3:4]
+    def pool(x):
+        return x.reshape(h // factor, factor, w // factor, factor, x.shape[-1]).mean(axis=(1, 3))
+    prgb, pal = pool(rgb), pool(al)
+    out = np.where(pal > 0, prgb / np.maximum(pal, 1e-9), 0)
+    res = np.concatenate([out, pal], axis=-1)
+    return Image.fromarray(np.clip(np.round(res * 255), 0, 255).astype(np.uint8), "RGBA")
+
+
+def tint_image(img, rgb):
+    """Draw.color multiply (team regions are white/grey masks)."""
+    r, g, b, a = img.split()
+    mul = [(rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255]
+    r, g, b = [ch.point(lambda v, m=m: v * m // 255) for ch, m in zip((r, g, b), mul)]
+    return Image.merge("RGBA", (r, g, b, a))
 
 
 def add_outline(img, color, radius):
@@ -258,7 +310,9 @@ def collect_blocks(up, used_env_names):
         vals, chain = eval_def(up, d)
         b = {"field": d.field, "name": d.name, "type": btype, "class": d.cls, "vals": vals,
              "chain": chain, "reqs": [], "category": None, "visibility": None,
-             "consumes": [], "power_use": 0.0, "output": None, "ammo": [], "boost": None}
+             "consumes": [], "power_use": 0.0, "output": None, "ammo": [], "boost": None,
+             # DrawMulti(..., new DrawRegion("-rotator"), new DrawRegion("-top")) layers, in order
+             "draw_regions": re.findall(r'new DrawRegion\("([^"]+)"\)', d.body or "")}
         for st in d.statements:
             m = re.match(r"requirements\((.*)\)$", st, re.S)
             if m:
@@ -522,6 +576,11 @@ def main():
         used_env |= set(m.floor) | set(m.overlay) | set(m.block)
 
     blocks = collect_blocks(up, used_env)
+    for b in blocks:  # Block.squareSprite, needed by the simulation tables even without sprites
+        if b["type"] not in ("Floor", "Ore", "Overlay", "StaticWall", "Prop") and b.get("vals") is not None:
+            layers = icon_layers(up, b)
+            canvas = compose_icon(up, layers, int(b["vals"].get("size", 1) or 1))
+            b["square"] = canvas.getchannel("A").getextrema()[0] >= int(0.9 * 255)
     items = collect_items(up)
     units = collect_units(up)
     sectors = collect_sectors(up)
@@ -598,11 +657,21 @@ def assign_sprites(up, sp, blocks, items, units):
                 for frame in range(4):
                     if blend or frame:
                         sp.add("%s-%d-%d" % (n, blend, frame))
+            # Autotiler.sliced(): topHalf = left half of the region, botHalf = right half.
+            # spr_extra + frame*2 = top half, + frame*2 + 1 = bottom half (Conveyor.draw joints)
+            for frame in range(4):
+                src = "%s-0-%d" % (n, frame)
+                k = sp.add_derived(src + "-tophalf", src, lambda im: im.crop((0, 0, im.width // 2, im.height)))
+                if frame == 0:
+                    b["spr_extra"] = k
+                sp.add_derived(src + "-bothalf", src, lambda im: im.crop((im.width // 2, 0, im.width, im.height)))
             continue
         if t == "ItemTurret":
             size = b["vals"].get("size", 1)
             b["spr"] = sp.add("block-%d" % size)
-            b["spr_top"] = sp.add(n, outline=True)
+            # DrawTurret: region + RegionParts; the official "-preview" sprite is that composition
+            top = n + "-preview" if up.sprite(n + "-preview") else n
+            b["spr_top"] = sp.add(top, outline=True, alias=n + "-turret")
             continue
         if t == "Wall" and up.variants(n):
             b["variants"] = up.variants(n)
@@ -614,14 +683,31 @@ def assign_sprites(up, sp, blocks, items, units):
         if t == "Drill":
             b["spr_rot"] = sp.add(n + "-rotator")
             b["spr_top"] = sp.add(n + "-top")
+        elif t == "Crafter" and b.get("draw_regions"):
+            # DrawRegion layers: "-rotator" spins (spinSprite), the others are always drawn
+            for suf in b["draw_regions"]:
+                if suf == "-rotator":
+                    b["spr_rot"] = sp.add(n + suf)
+                else:
+                    b["spr_extra"] = sp.add(n + suf)
         elif t in ("Crafter", "ConsumeGen", "Battery") and up.sprite(n + "-top"):
-            b["spr_top"] = sp.add(n + "-top")
+            b["spr_top"] = sp.add(n + "-top")  # DrawFlame / DrawWarmupRegion / battery charge
         elif t == "Core":
-            b["spr_team"] = sp.add(n + "-team")
+            # team regions are masks multiplied by the team colour (Draw.color): derelict, sharded, crux
+            b["spr_team"] = sp.add_derived(n + "-team-derelict", n + "-team", lambda im: tint_image(im, 0x4d4e58))
+            sp.add_derived(n + "-team-sharded", n + "-team", lambda im: tint_image(im, 0xffd37f))
+            sp.add_derived(n + "-team-crux", n + "-team", lambda im: tint_image(im, 0xf25555))
         elif t == "Bridge":
             b["spr_top"] = sp.add(n + "-end")
             b["spr_rot"] = sp.add(n + "-bridge")
             b["spr_extra"] = sp.add(n + "-arrow")
+    for b in blocks:
+        b["spr_icon"] = -1
+        if b["type"] in ("Air", "Floor", "Ore", "Overlay", "StaticWall", "Prop"):
+            continue
+        layers = icon_layers(up, b)
+        if layers:
+            b["spr_icon"] = sp.add_icon(b["name"], layers, int(b["vals"].get("size", 1) or 1))
     for u in units:
         n = u["name"]
         u["spr"] = sp.add(n, outline=True)
@@ -635,6 +721,50 @@ def assign_sprites(up, sp, blocks, items, units):
                   "white", "shape-3"):
         sp.add(extra, required=False)
     sp.add("logo")
+
+
+SHARDED = 0xffd37f  # Team.sharded.color
+
+
+def compose_icon(up, layers, size):
+    """Full-resolution composite of Block.icons() layers (tools/Generators.java)."""
+    canvas = Image.new("RGBA", (32 * size, 32 * size))
+    for name, outline, tint in layers:
+        path = up.sprite(name)
+        if not path:
+            continue
+        im = Image.open(path).convert("RGBA")
+        if outline:
+            im = add_outline(im, (0x40, 0x40, 0x49, 255), 3)
+        if tint is not None:
+            im = tint_image(im, tint)
+        canvas.alpha_composite(im, ((canvas.width - im.width) // 2, (canvas.height - im.height) // 2))
+    return canvas
+
+
+def icon_layers(up, b):
+    """Block.icons() of the upstream classes, as (sprite, outline, tint) layers."""
+    n, t = b["name"], b["type"]
+    size = int(b["vals"].get("size", 1) or 1)
+    if t == "Drill":                        # Drill.icons(): region, rotator, top
+        return [(n, False, None), (n + "-rotator", False, None), (n + "-top", False, None)]
+    if t == "ItemTurret":                   # DrawTurret.icons(): base, preview, (top)
+        top = n + "-preview" if up.sprite(n + "-preview") else n
+        layers = [("block-%d" % size, False, None), (top, True, None)]
+        if up.sprite(n + "-top"):
+            layers.append((n + "-top", False, None))
+        return layers
+    if t == "Conveyor":                     # Conveyor.icons(): regions[0][0]
+        return [(n + "-0-0", False, None)]
+    if t == "Wall":                         # Wall.icons(): name or name + "1"
+        return [(n if up.sprite(n) else n + "1", False, None)]
+    if t == "Core":                         # Generators: shard team top drawn over the region
+        return [(n, False, None), (n + "-team", False, SHARDED)]
+    if t == "Battery":                      # DrawMulti(DrawDefault, DrawPower, DrawRegion("-top"))
+        return [(n, False, None), (n + "-top", False, None)]
+    if b.get("draw_regions"):               # DrawMulti icons: DrawDefault + every DrawRegion
+        return [(n, False, None)] + [(n + suf, False, None) for suf in b["draw_regions"]]
+    return [(n, False, None)]               # DrawDefault / Block.icons(): region
 
 
 # --------------------------------------------------------------------------
@@ -709,7 +839,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
                   "{%s}, %d, {%s}, %d, {%d, %d}, %s, %s, %s, "
                   "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %s, "
                   "%s, %s, %d, %s, %s, %s, %s, %s, %s, %d, "
-                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d},") % (
+                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d},") % (
             b["name"], b["type"], cat_i, size, flag("solid"), flag("rotate"), buildable,
             cfloat(health), cfloat(build_cost), int(num("itemCapacity", 10)),
             req_s, len(reqs[:4]), cons_s, len(b["consumes"][:3]),
@@ -726,6 +856,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
             cfloat(num("inaccuracy")), cfloat(num("shootCone", 8)), int(num("maxAmmo", 30)),
             int(shoot.get("shots", 1)), 1 if v.get("targetAir", True) is not False else 0,
             1 if v.get("targetGround", True) is not False else 0, ammo_s, len(b["ammo"][:3]),
+            b.get("spr_icon", -1), 1 if b.get("square", True) else 0,
         ))
         b["tier"] = int(num("tier"))
     c.append("};")

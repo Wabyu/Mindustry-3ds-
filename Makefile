@@ -42,7 +42,7 @@ export _3DSXFLAGS := --smdh=$(OUTPUT).smdh --romfs=$(CURDIR)/$(ROMFS)
 
 SRC_CPP := $(notdir $(wildcard source/*.cpp)) content_gen.cpp
 
-.PHONY: all clean assets cia test
+.PHONY: all clean assets cia test scenes
 
 all: assets
 	@mkdir -p $(BUILD)
@@ -65,9 +65,12 @@ cia: all
 test:
 	sh tests/run_host.sh
 
+scenes: assets
+	sh tests/run_scenes.sh
+
 clean:
 	@echo cleaning generated files
-	@rm -rf build/arm build/gen build/gfx build/host build/gen-host build/romfs-host
+	@rm -rf build/arm build/gen build/gfx build/host build/gen-host build/romfs-host build/scenes build/scenes-nosnap
 	@rm -rf $(ROMFS)/gfx $(ROMFS)/maps $(ROMFS)/lang
 	@rm -f $(TARGET).3dsx $(TARGET).smdh $(TARGET).elf $(TARGET).cia
 

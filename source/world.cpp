@@ -198,11 +198,19 @@ Building* Game::closestCore(uint8_t team, float x, float y) {
 int32_t Game::addBuilding(int16_t block, int tx, int ty, uint8_t team, uint8_t rotation) {
     int x0, y0, x1, y1;
     linkedTiles(block, tx, ty, x0, y0, x1, y1);
-    // replacement (conveyor rotation / upgrade)
+    // replacement (conveyor upgrade): ConveyorBuild.overwrote keeps the items on the belt
+    Building prevConveyor;
+    bool keepConveyor = false;
     for (int y = y0; y <= y1; y++)
         for (int x = x0; x <= x1; x++) {
             Tile* t = tile(x, y);
-            if (t && t->build >= 0) removeBuilding(t->build, false);
+            if (t && t->build >= 0) {
+                Building& o = builds[t->build];
+                if (o.def().type == BType::Conveyor && kBlocks[block].type == BType::Conveyor && !o.constructing) {
+                    prevConveyor = o; keepConveyor = true;
+                }
+                removeBuilding(t->build, false);
+            }
             if (t && t->env && kBlocks[t->env].type == BType::Prop) t->env = 0;  // props are alwaysReplace
         }
     int32_t idx;
@@ -214,6 +222,11 @@ int32_t Game::addBuilding(int16_t block, int tx, int ty, uint8_t team, uint8_t r
     b.health = kBlocks[block].health;
     if (kBlocks[block].type == BType::Junction) {
         for (int i = 0; i < 4; i++) { b.jitem[i].clear(); b.jtime[i].clear(); }
+    }
+    if (keepConveyor) {
+        b.len = prevConveyor.len; b.mid = prevConveyor.mid; b.minitem = prevConveyor.minitem; b.clogHeat = prevConveyor.clogHeat;
+        for (int i = 0; i < 3; i++) { b.ids[i] = prevConveyor.ids[i]; b.xs[i] = prevConveyor.xs[i]; b.ys[i] = prevConveyor.ys[i]; }
+        b.items = prevConveyor.items;
     }
     for (int y = y0; y <= y1; y++)
         for (int x = x0; x <= x1; x++) tile(x, y)->build = idx;
@@ -272,23 +285,70 @@ static bool outputsItems(const BlockDef& d) {
     }
 }
 
-// Autotiler.buildBlending + Conveyor.blends
-static bool conveyorBlends(Game& g, Building& b, int direction) {
-    int dir = ((b.rotation - direction) % 4 + 4) % 4;
-    Building* other = g.buildAt(b.tx + d4x[dir], b.ty + d4y[dir]);
-    if (!other || other->team != b.team || other->constructing) return false;
-    const BlockDef& od = other->def();
-    // lookingAt: other is in front of this conveyor
-    int fx = b.tx + d4x[b.rotation], fy = b.ty + d4y[b.rotation];
+// Block.hasItems for the ported block types
+static bool hasItems(const BlockDef& d) {
+    return outputsItems(d) || d.type == BType::ItemTurret;
+}
+
+// A neighbour as seen by the autotiler: a building, or a build plan when previewing
+struct TileBlock { int16_t block; int tx, ty; uint8_t rotation; };
+
+static bool neighbourAt(Game& g, int x, int y, uint8_t team, bool usePlans, TileBlock& out) {
+    Building* o = g.buildAt(x, y);
+    if (o && o->team == team && !(o->constructing && !usePlans)) { out = {o->block, o->tx, o->ty, o->rotation}; return true; }
+    if (usePlans)
+        for (auto& p : g.plans)
+            if (!p.breaking) {
+                int x0, y0, x1, y1;
+                g.linkedTiles(p.block, p.tx, p.ty, x0, y0, x1, y1);
+                if (x >= x0 && x <= x1 && y >= y0 && y <= y1) { out = {p.block, p.tx, p.ty, p.rotation}; return true; }
+            }
+    return false;
+}
+
+// Autotiler.blends(tile, rotation, ..., direction) + Conveyor.blends
+static bool conveyorBlendsAt(Game& g, int tx, int ty, int rotation, uint8_t team, int direction, bool usePlans, TileBlock* who = nullptr) {
+    int dir = ((rotation - direction) % 4 + 4) % 4;
+    TileBlock other;
+    if (!neighbourAt(g, tx + d4x[dir], ty + d4y[dir], team, usePlans, other)) return false;
+    if (who) *who = other;
+    const BlockDef& od = kBlocks[other.block];
+    // lookingAt: the tile in front of this conveyor belongs to the other block
+    int fx = tx + d4x[rotation], fy = ty + d4y[rotation];
     int ox0, oy0, ox1, oy1;
-    g.linkedTiles(other->block, other->tx, other->ty, ox0, oy0, ox1, oy1);
+    g.linkedTiles(other.block, other.tx, other.ty, ox0, oy0, ox1, oy1);
     bool lookingAt = fx >= ox0 && fx <= ox1 && fy >= oy0 && fy <= oy1;
-    if (!(outputsItems(od) || (lookingAt && od.type != BType::Wall))) return false;
+    if (!(outputsItems(od) || (lookingAt && hasItems(od)))) return false;
     // lookingAtEither
     if (lookingAt) return true;
     if (!od.rotate) return true;  // !rotatedOutput
-    int tx = other->tx + d4x[other->rotation], ty = other->ty + d4y[other->rotation];
-    return tx == b.tx && ty == b.ty;
+    return other.tx + d4x[other.rotation] == tx && other.ty + d4y[other.rotation] == ty;
+}
+
+void Game::conveyorTiling(int tx, int ty, int rotation, uint8_t team, bool usePlans,
+                          uint8_t& bits, int8_t& sclx, int8_t& scly, uint8_t& blending) {
+    bool l = conveyorBlendsAt(*this, tx, ty, rotation, team, 1, usePlans);
+    bool back = conveyorBlendsAt(*this, tx, ty, rotation, team, 2, usePlans);
+    bool r = conveyorBlendsAt(*this, tx, ty, rotation, team, 3, usePlans);
+    // Autotiler.buildBlending + transformCase
+    int num = (back && l && r) ? 0 : (l && r) ? 1 : (l && back) ? 2 : (r && back) ? 3 : l ? 4 : r ? 5 : -1;
+    bits = 0; sclx = 1; scly = 1;
+    switch (num) {
+        case 0: bits = 3; break;
+        case 1: bits = 4; break;
+        case 2: bits = 2; break;
+        case 3: bits = 2; scly = -1; break;
+        case 4: bits = 1; scly = -1; break;
+        case 5: bits = 1; break;
+        default: break;
+    }
+    // blendresult[4]: joints drawn toward non-square neighbours (Conveyor.draw)
+    blending = 0;
+    for (int i = 0; i < 4; i++) {
+        TileBlock who;
+        if (conveyorBlendsAt(*this, tx, ty, rotation, team, i, usePlans, &who) && !kBlocks[who.block].squareSprite)
+            blending |= (uint8_t)(1 << i);
+    }
 }
 
 void Game::updateProximity(int32_t idx) {
@@ -315,18 +375,7 @@ void Game::updateProximity(int32_t idx) {
         int ni = buildIndexAt(b.tx + d4x[b.rotation], b.ty + d4y[b.rotation]);
         b.next = (n && n->team == b.team && !n->constructing) ? ni : -1;
         b.aligned = b.next >= 0 && n->def().type == BType::Conveyor && n->rotation == b.rotation;
-        bool l = conveyorBlends(*this, b, 1), back = conveyorBlends(*this, b, 2), r = conveyorBlends(*this, b, 3);
-        int num = (back && l && r) ? 0 : (l && r) ? 1 : (l && back) ? 2 : (r && back) ? 3 : l ? 4 : r ? 5 : -1;
-        b.blendbits = 0; b.blendsclx = 1; b.blendscly = 1;
-        switch (num) {
-            case 0: b.blendbits = 3; break;
-            case 1: b.blendbits = 4; break;
-            case 2: b.blendbits = 2; break;
-            case 3: b.blendbits = 2; b.blendscly = -1; break;
-            case 4: b.blendbits = 1; b.blendscly = -1; break;
-            case 5: b.blendbits = 1; break;
-            default: break;
-        }
+        conveyorTiling(b.tx, b.ty, b.rotation, b.team, false, b.blendbits, b.blendsclx, b.blendscly, b.blending);
     }
 }
 

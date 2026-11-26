@@ -448,10 +448,12 @@ bool Game::queuePlan(int tx, int ty, int16_t block, uint8_t rotation, bool break
         return true;
     }
     if (block <= 0 || !kBlocks[block].buildable) return false;
-    // rotating an existing conveyor in place
+    // Same block already there (built or under construction): Block.quickRotate changes the
+    // rotation in place, free of charge, keeping items and construction progress.
     Building* ex = buildAt(tx, ty);
-    if (ex && ex->block == block && ex->tx == tx && ex->ty == ty && kBlocks[block].rotate && !ex->constructing) {
-        if (ex->rotation != rotation) { ex->rotation = rotation; refreshAround(ex->id); }
+    if (ex && ex->block == block && ex->tx == tx && ex->ty == ty) {
+        if (kBlocks[block].rotate && ex->rotation != rotation) { ex->rotation = rotation; refreshAround(ex->id); }
+        if (ex->constructing && !ex->deconstructing) plans.push_back({tx, ty, block, rotation, false});
         return true;
     }
     if (!validPlace(block, tx, ty, rotation, TeamSharded)) return false;
@@ -499,7 +501,8 @@ void Game::updateBuilder(Unit& u, float delta) {
         }
         return;
     }
-    if (bi < 0) {
+    // start construction on a free tile, or replace (Block.canReplace: conveyor upgrade)
+    if (bi < 0 || (builds[bi].block != p.block && !builds[bi].constructing)) {
         if (!validPlace(p.block, p.tx, p.ty, p.rotation, u.team)) { plans.erase(plans.begin() + pi); return; }
         bi = addBuilding(p.block, p.tx, p.ty, u.team, p.rotation);
         Building& nb = builds[bi];

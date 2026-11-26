@@ -11,7 +11,8 @@ enum class BType : uint8_t {
     Air, Floor, Ore, Overlay, StaticWall, Prop,
     Conveyor, Junction, Router, Sorter, OverflowGate, Bridge,
     Drill, Crafter, ConsumeGen, PowerNode, Battery,
-    ItemTurret, Wall, Core, Storage
+    ItemTurret, Wall, Core, Storage,
+    Solar  // SolarGenerator
 };
 
 // mindustry.type.Category order
@@ -58,6 +59,8 @@ struct BlockDef {
     int maxAmmo, shots;
     bool targetAir, targetGround;
     AmmoDef ammo[3]; int nammo;
+    int16_t sprIcon;  // composite of Block.icons(), 32x32 UI size; sprIcon + 1 = 16x16
+    bool squareSprite;  // Block.squareSprite (Generators: no pixel below 90% alpha)
 };
 
 struct ItemDef {

@@ -27,6 +27,8 @@ public:
     void init();
     void frame(const platform::Input& in, float delta);  // delta in 60 Hz ticks
     void draw();
+    void frameInner(const platform::Input& in, float delta);
+    void drawInner();
     bool wantsExit() const { return exitRequested; }
 
     Game game;
@@ -45,8 +47,13 @@ public:
     float autosaveTimer = 0;
     float fps = 0;
     bool exitRequested = false;
+    bool hideHud = false;
+    // performance counters over a 2 s window (shown in the pause screen)
+    struct Perf { uint64_t windowStart = 0, simUs = 0, drawUs = 0; int frames = 0; float fps = 0, simMs = 0, drawMs = 0; } perf;  // control scenes: world only
     std::string toast; float toastTime = 0;
     int lastPlaceX = -9999, lastPlaceY = -9999;
+    int32_t configuring = -1;
+    int cursorTX = 0, cursorTY = 0;  // cursor tile of the last update  // building being configured (power node, bridge, sorter)
 
     std::vector<int> blocksIn(int cat) const;
     int selectedBlock() const;
@@ -60,10 +67,16 @@ private:
     void updateGame(const platform::Input& in, float delta);
     void updatePause(const platform::Input& in);
     void touchUi(int x, int y);
+    void dragStep(int x, int y);
+    void configureTap(Building* target);
+    void drawInspect(const Building& b);
     void drawWorld();
     void drawHud();
     void drawMenu();
     void drawBottom();
+    void drawBlock(int block, float sx, float sy, int rot, const Building* b, uint32_t tint, float blend, int tx = -1, int ty = -1);
+    int conveyorFrame(const Building& b) const;
+    int envMargin() const;
 };
 
 }  // namespace mdt

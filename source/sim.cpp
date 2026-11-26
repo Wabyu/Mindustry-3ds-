@@ -304,6 +304,11 @@ void Game::updateBuilding(int32_t idx, float delta) {
         case BType::Crafter: updateCrafter(*this, b, delta); break;
         case BType::ConsumeGen: updateGenerator(*this, b, delta); break;
         case BType::ItemTurret: updateTurret(*this, b, idx, delta); break;
+        case BType::Solar:
+            // SolarGenerator.updateTile: solarMultiplier * (lighting ? 1 - ambientLight.a : 1);
+            // the ported sectors have no lighting rule, so efficiency is 1
+            b.productionEfficiency = 1.f;
+            break;
         default: break;
     }
 }
@@ -396,6 +401,7 @@ void Game::rebuildPowerGraphs() {
         gid++;
     }
     graphSatisfaction.assign(gid, 0.f);
+    graphStats.assign(gid, GraphStats{});
     powerGraphsDirty = false;
 }
 
@@ -421,6 +427,9 @@ void Game::updatePower(float delta) {
     // PowerGraph.update: batteries cover deficits and absorb surplus
     std::vector<float> batteryDelta(n, 0);
     for (int g = 0; g < n; g++) {
+        GraphStats& st = graphStats[g];
+        st.produced = produced[g] / std::fmax(delta, 1e-6f); st.needed = needed[g] / std::fmax(delta, 1e-6f);
+        st.stored = stored[g]; st.capacity = capacity[g];
         if (needed[g] > produced[g]) {
             float used = std::fmin(stored[g], needed[g] - produced[g]);
             produced[g] += used; batteryDelta[g] = -used;
@@ -429,7 +438,11 @@ void Game::updatePower(float delta) {
             batteryDelta[g] = charge;
         }
         graphSatisfaction[g] = needed[g] <= 0 ? 1.f : std::fmin(1.f, produced[g] / needed[g]);
+        st.batteryDelta = batteryDelta[g] / std::fmax(delta, 1e-6f);
+        st.satisfaction = graphSatisfaction[g];
     }
+    for (auto& st : graphStats) st.members = 0;
+    for (auto& b : builds) if (b.alive && b.graph >= 0) graphStats[b.graph].members++;
     for (auto& b : builds) {
         if (!b.alive || b.graph < 0) continue;
         const BlockDef& d = b.def();
@@ -440,6 +453,150 @@ void Game::updatePower(float delta) {
             else if (batteryDelta[g] > 0) b.powerStored += batteryDelta[g] * ((d.powerBuffer - b.powerStored) / std::fmax(1e-6f, capacity[g] - stored[g]));
             b.powerStored = std::clamp(b.powerStored, 0.f, d.powerBuffer);
         }
+    }
+}
+
+// ---------------------------------------------------------------- configuration
+bool Game::powerLinkValid(const Building& node, const Building& other, bool checkMaxNodes) const {
+    if (&node == &other || !other.alive || node.team != other.team || !usesPower(other.def())) return false;
+    bool otherNode = other.def().type == BType::PowerNode;
+    if (inLaserRange(const_cast<Game&>(*this), node, other) || (otherNode && inLaserRange(const_cast<Game&>(*this), other, node))) {
+        if (checkMaxNodes && otherNode)
+            return (int)other.links.size() < other.def().maxNodes ||
+                   std::find(other.links.begin(), other.links.end(), node.id) != other.links.end();
+        return true;
+    }
+    return false;
+}
+
+bool Game::togglePowerLink(int32_t ni, int32_t oi) {
+    Building& n = builds[ni];
+    Building& o = builds[oi];
+    auto it = std::find(n.links.begin(), n.links.end(), oi);
+    auto back = std::find(o.links.begin(), o.links.end(), ni);
+    if (it != n.links.end() || back != o.links.end()) {  // PowerNode.configure: unlink
+        if (it != n.links.end()) n.links.erase(it);
+        if (back != o.links.end()) o.links.erase(back);
+        powerGraphsDirty = true;
+        return true;
+    }
+    if (!powerLinkValid(n, o, true) || (int)n.links.size() >= n.def().maxNodes) return false;
+    n.links.push_back(oi);
+    if (o.def().type == BType::PowerNode) o.links.push_back(ni);
+    powerGraphsDirty = true;
+    return true;
+}
+
+void Game::autoOrClearLinks(int32_t ni) {
+    Building& n = builds[ni];
+    if (!n.links.empty()) {
+        std::vector<int32_t> ls = n.links;
+        for (int32_t l : ls) togglePowerLink(ni, l);
+        return;
+    }
+    for (int32_t o : potentialPowerLinks(n.block, n.tx, n.ty, n.team)) togglePowerLink(ni, o);
+}
+
+std::vector<int32_t> Game::potentialPowerLinks(int16_t block, int tx, int ty, uint8_t team) {
+    // PowerNode.getPotentialLinks: nearest first, one link per distinct graph, skip touching buildings
+    if (powerGraphsDirty) rebuildPowerGraphs();
+    Building probe; probe.alive = true; probe.block = block; probe.tx = tx; probe.ty = ty; probe.team = team;
+    int x0, y0, x1, y1;
+    linkedTiles(block, tx, ty, x0, y0, x1, y1);
+    std::vector<std::pair<float, int32_t>> cand;
+    for (auto& o : builds) {
+        if (!o.alive || o.team != team || o.constructing || !usesPower(o.def())) continue;
+        if (o.tx == tx && o.ty == ty) continue;
+        if (!inLaserRange(*this, probe, o)) continue;
+        int ox0, oy0, ox1, oy1;
+        linkedTiles(o.block, o.tx, o.ty, ox0, oy0, ox1, oy1);
+        bool touching = ox0 <= x1 + 1 && ox1 >= x0 - 1 && oy0 <= y1 + 1 && oy1 >= y0 - 1 &&
+                        !((ox0 > x1 || ox1 < x0) && (oy0 > y1 || oy1 < y0));
+        if (touching) continue;  // adjacency already conducts
+        if (o.def().type == BType::PowerNode && (int)o.links.size() >= o.def().maxNodes) continue;
+        float dx = (float)(o.tx - tx), dy = (float)(o.ty - ty);
+        cand.push_back({dx * dx + dy * dy, o.id});
+    }
+    std::sort(cand.begin(), cand.end());
+    std::vector<int32_t> out, graphs;
+    for (auto& c : cand) {
+        if ((int)out.size() >= kBlocks[block].maxNodes) break;
+        int g = builds[c.second].graph;
+        if (g >= 0 && std::find(graphs.begin(), graphs.end(), g) != graphs.end()) continue;
+        out.push_back(c.second);
+        if (g >= 0) graphs.push_back(g);
+    }
+    return out;
+}
+
+bool Game::bridgeLinkValid(const Building& a, const Building& b) const {
+    // ItemBridge.positionsValid: same axis, within range, both bridges of the same team
+    if (&a == &b || !b.alive || b.def().type != BType::Bridge || a.team != b.team) return false;
+    int dx = b.tx - a.tx, dy = b.ty - a.ty;
+    if ((dx != 0) == (dy != 0)) return false;
+    return std::abs(dx + dy) <= (int)a.def().range;
+}
+
+bool Game::toggleBridgeLink(int32_t ai, int32_t bi) {
+    Building& a = builds[ai];
+    Building& b = builds[bi];
+    int pos = b.ty * width + b.tx;
+    if (a.link == pos) { a.link = -1; return true; }  // ItemBridge.configure: same target unlinks
+    if (!bridgeLinkValid(a, b)) return false;
+    if (b.link == a.ty * width + a.tx) b.link = -1;  // no two-way loop
+    a.link = pos;
+    return true;
+}
+
+StatusInfo Game::status(const Building& b) const {
+    const BlockDef& d = b.def();
+    StatusInfo s{Status::Active, Reason::None, -1, 0};
+    if (b.constructing) return {Status::Constructing, Reason::None, -1, b.buildProgress};
+    const GraphStats* gs = (b.graph >= 0 && b.graph < (int)graphStats.size()) ? &graphStats[b.graph] : nullptr;
+    switch (d.type) {
+        case BType::Crafter: {
+            if (d.output.item >= 0 && b.items.amount[d.output.item] + d.output.amount > d.itemCapacity)
+                return {Status::NoOutput, Reason::OutputFull, d.output.item, 0};
+            for (int i = 0; i < d.nconsumes; i++)
+                if (!b.items.has(d.consumes[i].item, d.consumes[i].amount))
+                    return {Status::NoInput, Reason::MissingItem, d.consumes[i].item, (float)d.consumes[i].amount};
+            if (d.powerUse > 0) {
+                if (b.graph < 0 || b.powerStatus <= 0.001f)  // alone in its graph = not wired at all
+                    return {Status::NoInput, (!gs || gs->members <= 1) ? Reason::Unpowered : Reason::NoPower, -1, 0};
+                // Building.status(): blinks between active and noInput according to efficiency
+                if (b.powerStatus < 0.999f)
+                    return {std::fmod(tick / 30.f, 1.f) < b.powerStatus ? Status::Active : Status::NoInput,
+                            Reason::LowPower, -1, b.powerStatus};
+            }
+            return s;
+        }
+        case BType::ConsumeGen: {
+            bool fuel = false;
+            for (int i = 0; i < ITEM_COUNT; i++) if (b.items.has(i) && kItems[i].flammability >= 0.2f) fuel = true;
+            if (!fuel && b.generateTime <= 0) return {Status::NoInput, Reason::NoFuel, -1, 0};
+            return {Status::Active, Reason::None, -1, b.productionEfficiency};
+        }
+        case BType::Drill:
+            if (b.dominantItems == 0 || b.dominantItem < 0) return {Status::NoInput, Reason::NoOre, -1, 0};
+            if (b.items.total >= d.itemCapacity) return {Status::NoOutput, Reason::OutputFull, b.dominantItem, 0};
+            return {Status::Active, Reason::None, b.dominantItem, 0};
+        case BType::ItemTurret:
+            if (b.ammo.empty()) return {Status::NoInput, Reason::NoAmmo, -1, 0};
+            return s;
+        case BType::Battery: {
+            // Battery.status(): power.status = stored fraction
+            float f = d.powerBuffer > 0 ? b.powerStored / d.powerBuffer : 0;
+            Reason r = gs && gs->batteryDelta > 1e-4f ? Reason::Charging : gs && gs->batteryDelta < -1e-4f ? Reason::Discharging
+                     : f >= 0.999f ? Reason::BatteryFull : f <= 0.001f ? Reason::BatteryEmpty : Reason::None;
+            Status st = f <= 0.001f ? Status::NoInput : f >= 0.999f ? Status::Active : Status::NoOutput;
+            return {st, r, -1, f};
+        }
+        case BType::PowerNode:
+            if (!gs) return {Status::NoInput, Reason::Unpowered, -1, 0};
+            if (gs->needed > 0 && gs->satisfaction < 0.999f) return {Status::NoOutput, Reason::LowPower, -1, gs->satisfaction};
+            return {Status::Active, Reason::None, -1, gs->satisfaction};
+        default:
+            return s;
     }
 }
 

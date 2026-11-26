@@ -30,12 +30,18 @@ jobs:
         shell: bash
     steps:
       - name: Install build dependencies
-        run: apt-get update && apt-get install -y --no-install-recommends python3-pil build-essential git ca-certificates
+        run: apt-get update && apt-get install -y --no-install-recommends python3-pil python3-numpy fonts-dejavu-core build-essential git ca-certificates
       - uses: actions/checkout@v4
         with:
           submodules: true
       - name: Generate assets from upstream Mindustry and compile for the 3DS
         run: make -j2
+      - name: Visual control scenes (host composition with the real atlas)
+        run: TEX3DS=/opt/devkitpro/tools/bin/tex3ds sh tests/run_scenes.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: control-scenes
+          path: build/scenes/*.png
       - name: Build makerom / bannertool from pinned sources
         run: bash tools/install_cia_tools.sh
       - name: Package CIA

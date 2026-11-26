@@ -48,7 +48,7 @@ struct Building {
     float minitem = 1, clogHeat = 0;
     int32_t next = -1;
     bool aligned = false;
-    uint8_t blendbits = 0; int8_t blendsclx = 1, blendscly = 1;
+    uint8_t blendbits = 0, blending = 0; int8_t blendsclx = 1, blendscly = 1;  // Autotiler results
     // Router / sorter
     int16_t lastItem = -1;
     int32_t lastInput = -1;    // tile index
@@ -125,6 +125,17 @@ struct SpawnGroupDef {
     float getShield(int wave) const { return std::fmax(shields + shieldScaling * (wave - begin), 0.f); }
 };
 
+// mindustry.world.meta.BlockStatus + the reason shown to the player
+enum class Status : uint8_t { Active, NoOutput, NoInput, Constructing };
+enum class Reason : uint8_t {
+    None, NoFuel, NoPower, LowPower, MissingItem, OutputFull, NoOre, NoAmmo,
+    Charging, Discharging, BatteryFull, BatteryEmpty, Unpowered
+};
+struct StatusInfo { Status status; Reason reason; int16_t item; float value; };
+
+// per power graph totals of the last update, per tick (PowerGraph.update)
+struct GraphStats { float produced = 0, needed = 0, stored = 0, capacity = 0, batteryDelta = 0, satisfaction = 0; int members = 0; };
+
 struct Effect { float x, y, time, life, size; uint32_t color; uint8_t kind; };
 
 enum class GameState : uint8_t { Playing, Won, Lost };
@@ -175,6 +186,9 @@ public:
     int32_t addBuilding(int16_t block, int tx, int ty, uint8_t team, uint8_t rotation);
     void removeBuilding(int32_t idx, bool destroyed);
     void updateProximity(int32_t idx);
+    // Autotiler tiling for a conveyor at (tx, ty); usePlans also counts queued plans (placement preview)
+    void conveyorTiling(int tx, int ty, int rotation, uint8_t team, bool usePlans,
+                        uint8_t& bits, int8_t& sclx, int8_t& scly, uint8_t& blending);
     void refreshAround(int32_t idx);
     bool validPlace(int16_t block, int tx, int ty, uint8_t rotation, uint8_t team, bool allowReplace = true);
     void linkedTiles(int16_t block, int tx, int ty, int& x0, int& y0, int& x1, int& y1) const;
@@ -197,6 +211,19 @@ public:
     void autoLinkPower(int32_t idx);
     bool powerGraphsDirty = true;
     std::vector<float> graphSatisfaction;
+    std::vector<GraphStats> graphStats;
+    StatusInfo status(const Building& b) const;
+    // PowerNode.linkValid(this, other, checkMaxNodes)
+    bool powerLinkValid(const Building& node, const Building& other, bool checkMaxNodes) const;
+    // PowerNode.configure(pos): toggle a laser link; returns true if anything changed
+    bool togglePowerLink(int32_t node, int32_t other);
+    // PowerNode double tap: link to potential targets, or clear every link
+    void autoOrClearLinks(int32_t node);
+    // buildings a node placed at (tx, ty) would link to (placement preview)
+    std::vector<int32_t> potentialPowerLinks(int16_t block, int tx, int ty, uint8_t team);
+    // ItemBridge.linkValid + configure
+    bool bridgeLinkValid(const Building& a, const Building& b) const;
+    bool toggleBridgeLink(int32_t a, int32_t b);
 
     // units
     int32_t spawnUnit(int16_t type, uint8_t team, float x, float y);
@@ -228,6 +255,13 @@ public:
     long itemsDelivered[ITEM_COUNT] = {};
     int unitsKilled = 0;
 };
+
+// Conveyor.draw: frame = enabled && clogHeat <= 0.5 ? (int)(Time.time * speed * 8 * efficiency) % 4 : 0.
+// No item is required: an empty belt keeps scrolling.
+inline int conveyorFrame(const Building& b, float time) {
+    if (b.constructing || b.clogHeat > 0.5f) return 0;
+    return ((int)(time * b.def().speed * 8.f * b.efficiency)) % 4;
+}
 
 inline float angleDeg(float x, float y) { float a = std::atan2(y, x) * 57.29578f; return a < 0 ? a + 360.f : a; }
 float moveToward(float angle, float to, float speed);

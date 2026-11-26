@@ -26,5 +26,6 @@ std::string assetPath(const std::string& rel);  // romfs:/rel on 3DS
 std::string dataPath(const std::string& rel);   // sdmc:/3ds/mindustry-3ds/rel on 3DS
 std::string languageCode();                    // "fr", "en", ...
 uint64_t millis();
+uint64_t micros();  // high resolution timer (svcGetSystemTick on the 3DS)
 
 }  // namespace platform

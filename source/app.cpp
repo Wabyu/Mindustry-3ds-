@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include "gfx.hpp"
+#include "gfx_quad.hpp"
 #include "save.hpp"
 #include "sprites_gen.hpp"
 
@@ -79,6 +80,30 @@ static const UiString kUi[] = {
     {"help", "Circle pad: fly  D-pad: cursor  A: place  B: remove\nY: mine  X: rotate  L/R: block  SELECT: category",
              "Stick : voler  Croix : curseur  A : poser  B : démolir\nY : miner  X : tourner  L/R : bloc  SELECT : catégorie"},
     {"power", "Power", "Énergie"},
+    {"drawcpu", "draw", "dessin"},
+    {"maxlinks", "Too many links (max 10)", "Trop de liens (10 max.)"},
+    {"st.active", "Active", "Actif"},
+    {"st.nofuel", "No fuel", "Sans combustible"},
+    {"st.nopower", "No power", "Sans courant"},
+    {"st.unpowered", "Not connected to power", "Non relié au réseau"},
+    {"st.lowpower", "Insufficient power", "Courant insuffisant"},
+    {"st.missing", "Missing", "Manque"},
+    {"st.outputfull", "Output full", "Sortie pleine"},
+    {"st.noore", "No ore under the drill", "Aucun minerai dessous"},
+    {"st.noammo", "No ammo", "Sans munitions"},
+    {"st.charging", "Charging", "En charge"},
+    {"st.discharging", "Discharging", "En décharge"},
+    {"st.full", "Full", "Pleine"},
+    {"st.empty", "Empty", "Vide"},
+    {"st.building", "Under construction", "En construction"},
+    {"net", "Network", "Réseau"},
+    {"stored", "stored", "stock"},
+    {"cfg.node", "A: link/unlink  A on node: auto/clear  B: done", "A : lier/délier  A sur le nœud : auto/tout délier  B : fini"},
+    {"cfg.bridge", "A on a bridge in line (4 tiles): link  B: done", "A sur un pont aligné (4 cases) : lier  B : fini"},
+    {"cfg.sorter", "L/R: sorted item  B: done", "L/R : objet trié  B : fini"},
+    {"help.power", "Power: generator -> node (laser) -> machine, or touching blocks.",
+                   "Énergie : générateur -> nœud (laser) -> machine, ou blocs collés."},
+    {"none", "none", "aucun"},
     {"ammo", "Ammo", "Munitions"},
 };
 std::string Lang::ui(const char* key) const {
@@ -168,6 +193,22 @@ static std::vector<int> usedCategories() {
 }
 
 void App::frame(const Input& in, float delta) {
+    uint64_t t0 = micros();
+    frameInner(in, delta);
+    perf.simUs += micros() - t0;
+    perf.frames++;
+    uint64_t now = micros();
+    if (perf.windowStart == 0) perf.windowStart = now;
+    if (now - perf.windowStart >= 2000000) {
+        float secs = (now - perf.windowStart) / 1e6f;
+        perf.fps = perf.frames / secs;
+        perf.simMs = perf.simUs / 1000.f / perf.frames;
+        perf.drawMs = perf.drawUs / 1000.f / perf.frames;
+        perf.windowStart = now; perf.frames = 0; perf.simUs = perf.drawUs = 0;
+    }
+}
+
+void App::frameInner(const Input& in, float delta) {
     if (toastTime > 0) toastTime -= delta;
     switch (screen) {
         case Screen::Menu: updateMenu(in); break;
@@ -261,6 +302,7 @@ void App::updateGame(const Input& in, float delta) {
     int px = (int)std::floor(camX / tilesize + 0.5f), py = (int)std::floor(camY / tilesize + 0.5f);
     int cx = px + cursorDX, cy = py + cursorDY;
 
+    cursorTX = cx; cursorTY = cy;
     auto cats = usedCategories();
     if (in.down & KSelect) {
         auto it = std::find(cats.begin(), cats.end(), category);
@@ -268,41 +310,45 @@ void App::updateGame(const Input& in, float delta) {
         category = cats[(i + 1) % cats.size()];
     }
     auto list = blocksIn(category);
-    if (!list.empty()) {
+    Building* conf = (configuring >= 0 && game.builds[configuring].alive) ? &game.builds[configuring] : nullptr;
+    if (!conf) configuring = -1;
+    if (conf && conf->def().type == BType::Sorter) {
+        // Sorter config: L/R cycle the sorted item (none, then every item)
+        if (in.down & KR) conf->sortItem = (int16_t)(conf->sortItem + 1 >= ITEM_COUNT ? -1 : conf->sortItem + 1);
+        if (in.down & KL) conf->sortItem = (int16_t)(conf->sortItem <= -1 ? ITEM_COUNT - 1 : conf->sortItem - 1);
+    } else if (!list.empty()) {
         if (in.down & KR) selected[category] = (selected[category] + 1) % (int)list.size();
         if (in.down & KL) selected[category] = (selected[category] + (int)list.size() - 1) % (int)list.size();
     }
     if (in.down & KX) rotation = (rotation + 1) % 4;
 
-    // A: place (held: drag lines, e.g. conveyors), B: remove, Y: mine
-    if (in.held & KA) {
+    Building* under = game.buildAt(cx, cy);
+    bool configurable = under && under->team == TeamSharded && !under->constructing &&
+                        (under->def().type == BType::PowerNode || under->def().type == BType::Bridge || under->def().type == BType::Sorter);
+    // A: configure / place (held: drag lines), B: cancel or remove, Y: mine
+    if ((in.down & KA) && mode == Mode::Build && (conf || configurable)) {
+        configureTap(under);
+        lastPlaceX = lastPlaceY = -9999;
+    } else if ((in.held & KA) && !conf) {
         if (mode == Mode::Mine) {
             if (in.down & KA && game.player >= 0) game.units[game.player].mineTile = cy * game.width + cx;
         } else if (mode == Mode::Break) {
             game.queuePlan(cx, cy, 0, 0, true);
-        } else if ((in.down & KA) || cx != lastPlaceX || cy != lastPlaceY) {
-            // dragging a rotating block orients it along the drag direction
-            if (!(in.down & KA) && kBlocks[selectedBlock()].rotate) {
-                int ddx = cx - lastPlaceX, ddy = cy - lastPlaceY;
-                if (std::abs(ddx) + std::abs(ddy) == 1) {
-                    rotation = ddx > 0 ? 0 : ddx < 0 ? 2 : ddy > 0 ? 1 : 3;
-                    int pb = game.buildIndexAt(lastPlaceX, lastPlaceY);
-                    if (pb >= 0 && game.builds[pb].block == selectedBlock()) {
-                        game.builds[pb].rotation = rotation;
-                        game.refreshAround(pb);
-                    }
-                    for (auto& p : game.plans) if (p.tx == lastPlaceX && p.ty == lastPlaceY && !p.breaking) p.rotation = rotation;
-                }
-            }
-            if (!game.queuePlan(cx, cy, (int16_t)selectedBlock(), rotation, false) && (in.down & KA)) {
-                toast = lang.ui("invalid"); toastTime = 60;
-            }
+        } else if (in.down & KA) {
+            if (!game.queuePlan(cx, cy, (int16_t)selectedBlock(), rotation, false)) { toast = lang.ui("invalid"); toastTime = 60; }
+            lastPlaceX = cx; lastPlaceY = cy;
+        } else if (lastPlaceX != -9999 && (cx != lastPlaceX || cy != lastPlaceY)) {
+            // a diagonal cursor step is split into two single-axis steps (no hole in the line)
+            if (cx != lastPlaceX && cy != lastPlaceY) dragStep(cx, lastPlaceY);
+            dragStep(cx, cy);
         }
-        lastPlaceX = cx; lastPlaceY = cy;
     } else {
         lastPlaceX = lastPlaceY = -9999;
     }
-    if (in.down & KB) game.queuePlan(cx, cy, 0, 0, true);
+    if (in.down & KB) {
+        if (conf) configuring = -1;
+        else game.queuePlan(cx, cy, 0, 0, true);
+    }
     if (in.down & KY && game.player >= 0) {
         Unit& u = game.units[game.player];
         int t = cy * game.width + cx;
@@ -312,8 +358,55 @@ void App::updateGame(const Input& in, float delta) {
     if (in.touchStart) touchUi(in.touchX, in.touchY);
 }
 
+// One step of a held-A line. The previous belt is turned toward the new cell only if the new
+// cell could be placed (an obstacle leaves the line as it was, nothing is charged).
+void App::dragStep(int x, int y) {
+    int blk = selectedBlock();
+    int ddx = x - lastPlaceX, ddy = y - lastPlaceY;
+    uint8_t dir = rotation;
+    if (kBlocks[blk].rotate && std::abs(ddx) + std::abs(ddy) == 1) dir = ddx > 0 ? 0 : ddx < 0 ? 2 : ddy > 0 ? 1 : 3;
+    if (!game.queuePlan(x, y, (int16_t)blk, dir, false)) return;  // stop: lastPlace stays on the last good cell
+    if (kBlocks[blk].rotate && std::abs(ddx) + std::abs(ddy) == 1) {
+        rotation = dir;
+        Building* prev = game.buildAt(lastPlaceX, lastPlaceY);
+        if (prev && prev->block == blk && prev->tx == lastPlaceX && prev->ty == lastPlaceY && prev->rotation != dir) {
+            prev->rotation = dir;  // quick rotate: free, items kept
+            game.refreshAround(prev->id);
+        }
+        for (auto& p : game.plans) if (p.tx == lastPlaceX && p.ty == lastPlaceY && !p.breaking) p.rotation = dir;
+    }
+    lastPlaceX = x; lastPlaceY = y;
+}
+
+// Block configuration taps (PowerNode.onConfigureBuildTapped, ItemBridge, Sorter)
+void App::configureTap(Building* target) {
+    Building* conf = configuring >= 0 ? &game.builds[configuring] : nullptr;
+    if (!conf) {
+        if (target) configuring = target->id;
+        return;
+    }
+    if (!target) { configuring = -1; return; }
+    if (conf->def().type == BType::PowerNode) {
+        if (target == conf) { game.autoOrClearLinks(conf->id); configuring = -1; return; }  // double tap
+        if (game.powerLinkValid(*conf, *target, false)) {
+            if (!game.togglePowerLink(conf->id, target->id)) { toast = lang.ui("maxlinks"); toastTime = 90; }
+            return;
+        }
+    } else if (conf->def().type == BType::Bridge) {
+        if (target != conf && target->def().type == BType::Bridge) {
+            if (!game.toggleBridgeLink(conf->id, target->id)) { toast = lang.ui("invalid"); toastTime = 60; }
+            else configuring = -1;
+            return;
+        }
+    }
+    // tapping anything else selects it (if configurable) or closes the configuration
+    bool configurable = target->team == TeamSharded && (target->def().type == BType::PowerNode ||
+                        target->def().type == BType::Bridge || target->def().type == BType::Sorter);
+    configuring = (configurable && target != conf) ? target->id : -1;
+}
+
 // bottom screen layout
-static const int kTabY = 58, kTabH = 26, kGridY = 88, kCellW = 45, kCellH = 38, kCols = 7;
+static const int kTabY = 56, kTabH = 26, kGridY = 84, kCellW = 45, kCellH = 40, kCols = 7, kInfoY = 166;
 
 void App::touchUi(int x, int y) {
     if (y < 20 && x > 236) {  // next wave
@@ -346,9 +439,13 @@ void App::touchUi(int x, int y) {
 // ---------------------------------------------------------------- drawing
 static char buf[256];
 
+// The camera is snapped to whole screen pixels (0.5 world unit at 16 px per tile) so every
+// layer shares the same sub-pixel phase while the camera glides.
 static void worldToScreen(const App& a, float wx, float wy, float& sx, float& sy) {
-    sx = (wx - a.camX) * kZoom + gfx::TopW / 2.f;
-    sy = gfx::H / 2.f - (wy - a.camY) * kZoom;
+    float cx = gfx::snapEnabled ? std::floor(a.camX * kZoom + 0.5f) / kZoom : a.camX;
+    float cy = gfx::snapEnabled ? std::floor(a.camY * kZoom + 0.5f) / kZoom : a.camY;
+    sx = (wx - cx) * kZoom + gfx::TopW / 2.f;
+    sy = gfx::H / 2.f - (wy - cy) * kZoom;
 }
 
 static uint32_t hash2(int x, int y) {
@@ -364,10 +461,169 @@ static int variantSprite(const BlockDef& d, int x, int y) {
 
 static uint32_t withAlpha(uint32_t c, float a) { return (c & 0xffffff00u) | (uint32_t)(std::clamp(a, 0.f, 1.f) * 255); }
 
+// Conveyor.draw: frame = enabled && clogHeat <= 0.5 ? (int)(Time.time * speed * 8 * efficiency) % 4 : 0
+// (no item needed: an empty belt keeps scrolling)
+int App::conveyorFrame(const Building& b) const { return mdt::conveyorFrame(b, game.tick); }
+
+int App::envMargin() const {
+    static int margin = -1;
+    if (margin < 0) {
+        int m = 16;
+        for (int k = 0; k < BLOCK_COUNT; k++) {
+            const BlockDef& d = kBlocks[k];
+            if (d.type != BType::StaticWall && d.type != BType::Prop) continue;
+            for (int v = 0; v < std::max(1, d.variants); v++) {
+                int s = d.variants ? d.sprVar + v : d.spr;
+                m = std::max(m, std::max(gfx::spriteW(s), gfx::spriteH(s)));
+            }
+        }
+        margin = (m / 16 + 1) / 2 + 1;  // tiles a sprite can overhang its own tile, plus one
+    }
+    return margin;
+}
+
+// Draws a block the way its upstream draw() layers it. `b` is null for ghosts (plans, cursor).
+void App::drawBlock(int block, float sx, float sy, int rot, const Building* b, uint32_t tint, float blend, int tx, int ty) {
+    const BlockDef& d = kBlocks[block];
+    switch (d.type) {
+        case BType::Conveyor: {
+            int frame = b ? conveyorFrame(*b) : 0;
+            uint8_t bits = b ? b->blendbits : 0, joints = 0;
+            int8_t scx = b ? b->blendsclx : 1, scy = b ? b->blendscly : 1;
+            if (!b && tx >= 0)  // placement preview: Autotiler.getTiling with queued plans as neighbours
+                game.conveyorTiling(tx, ty, rot, TeamSharded, true, bits, scx, scy, joints);
+            gfx::sprite(d.sprVar + bits * 4 + frame, sx, sy, rot * 90.f, scx, scy, tint, blend);
+            break;
+        }
+        case BType::Drill:  // Drill.draw: region, rotator (timeDrilled * rotateSpeed), top
+            gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+            gfx::sprite(d.sprRot, sx, sy, b ? b->timeDrilled * 2.f : 0, 1, 1, tint, blend);
+            gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, tint, blend);
+            if (b && b->dominantItem >= 0 && !b->constructing)
+                gfx::sprite(kItems[b->dominantItem].spr, sx, sy, 0, 0.5f, 0.5f);  // drawMineItem-like ore marker
+            break;
+        case BType::ItemTurret: {  // DrawTurret: base, then the outlined turret (region + parts)
+            gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+            float tr = b ? b->turretRotation : 90.f;
+            float r = tr * 0.0174533f, rec = b ? -b->recoil * kZoom : 0;
+            gfx::sprite(d.sprTop, sx + std::cos(r) * rec, sy - std::sin(r) * rec, tr - 90, 1, 1, tint, blend);
+            break;
+        }
+        case BType::Core:  // region + team region multiplied by the team colour
+            gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+            gfx::sprite(d.sprTeam + (b ? std::min<int>(b->team, 2) : 1), sx, sy, 0, 1, 1, tint, blend);
+            break;
+        case BType::Wall: {
+            int s = d.variants > 0 ? d.sprVar + (b ? (int)(hash2(b->tx, b->ty) % (uint32_t)d.variants) : 0) : d.spr;
+            gfx::sprite(s, sx, sy, 0, 1, 1, tint, blend);
+            break;
+        }
+        default:
+            gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+            if (d.type == BType::Crafter) {
+                // DrawRegion("-rotator"){spinSprite, rotateSpeed = 2}: totalProgress * rotateSpeed
+                if (d.sprRot >= 0) gfx::sprite(d.sprRot, sx, sy, b ? b->totalProgress * 2.f : 0, 1, 1, tint, blend);
+                if (d.sprExtra >= 0) gfx::sprite(d.sprExtra, sx, sy, 0, 1, 1, tint, blend);
+            }
+            if (d.sprTop >= 0 && d.type != BType::Bridge) {
+                if (!b) {  // ghost: same layers as the icon (Battery: DrawRegion("-top"))
+                    if (d.type == BType::Battery) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, tint, blend);
+                } else if (!b->constructing) {
+                    float a = d.type == BType::Battery ? (d.powerBuffer > 0 ? b->powerStored / d.powerBuffer : 0) : b->warmup;
+                    if (a > 0.01f) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, withAlpha(d.type == BType::Battery ? 0xfbd367ff : 0xffffffff, a));
+                }
+            }
+            break;
+    }
+}
+
+static std::string fmtRate(float perTick) {
+    char b[32];
+    float v = perTick * 60.f;
+    if (std::fabs(v) >= 100) std::snprintf(b, sizeof b, "%.0f", v);
+    else std::snprintf(b, sizeof b, "%.1f", v);
+    return b;
+}
+
+void App::drawInspect(const Building& b) {
+    const BlockDef& d = b.def();
+    StatusInfo st = game.status(b);
+    gfx::rect(0, 166, 320, 45, kPanel);
+    if (d.sprIcon >= 0) gfx::sprite(d.sprIcon, 21, 188);
+    gfx::text(42, 168, 0.43f, kAccent, lang.blockName(b.block).c_str());
+    // BlockStatus colours: active 5ce677, noOutput orange, noInput Pal.remove
+    uint32_t led = st.status == Status::Active ? 0x5ce677ff : st.status == Status::NoOutput ? 0xffa500ff
+                 : st.status == Status::Constructing ? kAccent : kRed;
+    const char* key = nullptr;
+    switch (st.reason) {
+        case Reason::NoFuel: key = "st.nofuel"; break;
+        case Reason::NoPower: key = "st.nopower"; break;
+        case Reason::Unpowered: key = "st.unpowered"; break;
+        case Reason::LowPower: key = "st.lowpower"; break;
+        case Reason::MissingItem: key = "st.missing"; break;
+        case Reason::OutputFull: key = "st.outputfull"; break;
+        case Reason::NoOre: key = "st.noore"; break;
+        case Reason::NoAmmo: key = "st.noammo"; break;
+        case Reason::Charging: key = "st.charging"; break;
+        case Reason::Discharging: key = "st.discharging"; break;
+        case Reason::BatteryFull: key = "st.full"; break;
+        case Reason::BatteryEmpty: key = "st.empty"; break;
+        default: key = st.status == Status::Constructing ? "st.building" : "st.active"; break;
+    }
+    std::string label = lang.ui(key);
+    if (st.reason == Reason::MissingItem && st.item >= 0) label += " : " + std::to_string((int)st.value) + " " + lang.itemName(st.item);
+    if (st.reason == Reason::LowPower || st.status == Status::Constructing) label += " " + std::to_string((int)(st.value * 100)) + "%";
+    gfx::rect(42, 186, 8, 8, led);
+    gfx::text(54, 182, 0.4f, 0xffffffff, label.c_str());
+    // detail line: contents, recipe or network balance
+    std::string detail;
+    const GraphStats* gs = (b.graph >= 0 && b.graph < (int)game.graphStats.size()) ? &game.graphStats[b.graph] : nullptr;
+    if (configuring == b.id) {
+        detail = lang.ui(d.type == BType::PowerNode ? "cfg.node" : d.type == BType::Bridge ? "cfg.bridge" : "cfg.sorter");
+        if (d.type == BType::Sorter)
+            detail = (b.sortItem >= 0 ? lang.itemName(b.sortItem) : lang.ui("none")) + "   " + detail;
+    } else if (gs && (d.powerUse > 0 || d.powerProduction > 0 || d.powerBuffer > 0 || d.type == BType::PowerNode)) {
+        detail = lang.ui("net") + "  +" + fmtRate(gs->produced) + "  -" + fmtRate(gs->needed) + "/s";
+        if (gs->capacity > 0) detail += "  " + lang.ui("stored") + " " + std::to_string((int)gs->stored) + "/" + std::to_string((int)gs->capacity);
+    } else if (d.powerUse > 0) {
+        detail = lang.ui("help.power");
+    } else if (d.type == BType::Drill && b.dominantItem >= 0) {
+        // Drill: 60 / (drillTime + 50 * hardness) * ore count items per second at full speed
+        float rate = 60.f / (d.drillTime + d.hardnessMul * kItems[b.dominantItem].hardness) * b.dominantItems;
+        char t[48]; std::snprintf(t, sizeof t, "%.2f/s ", rate);
+        detail = std::string(t) + lang.itemName(b.dominantItem);
+    } else if (d.type == BType::ItemTurret) {
+        detail = lang.ui("ammo") + " " + std::to_string(b.totalAmmo) + "/" + std::to_string(d.maxAmmo);
+    }
+    if (d.type == BType::Crafter && st.reason != Reason::MissingItem && configuring != b.id && !gs) {
+        detail.clear();
+        for (int i = 0; i < d.nconsumes; i++) detail += std::to_string(d.consumes[i].amount) + " " + lang.itemName(d.consumes[i].item) + (i + 1 < d.nconsumes ? " + " : "");
+        if (d.output.item >= 0) detail += " -> " + lang.itemName(d.output.item);
+    }
+    if (!detail.empty()) gfx::text(42, 196, 0.36f, kGray, detail.c_str());
+    // contents (items held), right aligned, 16 px icons
+    float x = 316;
+    for (int i = ITEM_COUNT - 1; i >= 0 && d.type != BType::Core && d.type != BType::Conveyor; i--) {
+        if (b.items.amount[i] <= 0) continue;
+        std::snprintf(buf, sizeof buf, "%d", (int)b.items.amount[i]);
+        float w = gfx::textWidth(buf, 0.38f);
+        gfx::text(x, 168, 0.38f, 0xffffffff, buf, 2);
+        gfx::sprite(kItems[i].spr, x - w - 9, 175);
+        x -= w + 22;
+        if (x < 200) break;
+    }
+}
+
 void App::draw() {
+    uint64_t t0 = micros();
+    drawInner();
+    perf.drawUs += micros() - t0;
+}
+
+void App::drawInner() {
     if (screen == Screen::Menu) { drawMenu(); return; }
     drawWorld();
-    drawHud();
+    if (!hideHud) drawHud();
     drawBottom();
 }
 
@@ -389,18 +645,43 @@ void App::drawWorld() {
             if (fs >= 0) gfx::sprite(fs, sx, sy);
             if (t.ore) { int os = variantSprite(kBlocks[t.ore], x, y); if (os >= 0) gfx::sprite(os, sx, sy); }
         }
-    // static walls, props (shadows first)
-    for (int y = y0; y <= y1; y++)
-        for (int x = x0; x <= x1; x++) {
-            Tile& t = g.tiles[y * g.width + x];
-            if (!t.env) continue;
-            const BlockDef& d = kBlocks[t.env];
-            worldToScreen(*this, x * tilesize, y * tilesize, sx, sy);
-            if (d.sprExtra >= 0 && d.type == BType::StaticWall && gfx::spriteW(d.sprExtra) > 16) gfx::sprite(d.sprExtra, sx, sy, 0, 1, 1, 0x00000080, 1);
-            int s = variantSprite(d, x, y);
-            if (s >= 0) {
-                float rot = (gfx::spriteW(s) > 16) ? (float)(hash2(x, y) % 4) * 90.f : 0.f;  // trees: Mathf.randomSeed rotation
-                gfx::sprite(s, sx, sy, rot);
+    // static walls, props: every shadow first, then the bodies (Layer order of
+    // StaticWall/TreeBlock), with a margin covering sprites larger than one tile
+    int em = envMargin();
+    int ex0 = std::max(0, x0 - em), ex1 = std::min(g.width - 1, x1 + em);
+    int ey0 = std::max(0, y0 - em), ey1 = std::min(g.height - 1, y1 + em);
+    for (int pass = 0; pass < 2; pass++)
+        for (int y = ey0; y <= ey1; y++)
+            for (int x = ex0; x <= ex1; x++) {
+                Tile& t = g.tiles[y * g.width + x];
+                if (!t.env) continue;
+                const BlockDef& d = kBlocks[t.env];
+                worldToScreen(*this, x * tilesize, y * tilesize, sx, sy);
+                if (pass == 0) {
+                    if (d.sprExtra >= 0 && d.type == BType::StaticWall && gfx::spriteW(d.sprExtra) > 16)
+                        gfx::sprite(d.sprExtra, sx, sy, 0, 1, 1, 0x00000080, 1);
+                    continue;
+                }
+                int s = variantSprite(d, x, y);
+                if (s >= 0) {
+                    float rot = (gfx::spriteW(s) > 16) ? (float)(hash2(x, y) % 4) * 90.f : 0.f;  // trees: Mathf.randomSeed rotation
+                    gfx::sprite(s, sx, sy, rot);
+                }
+            }
+    // conveyor joints under the blocks (Conveyor.draw at Layer.blockUnder)
+    for (int y = y0 - 1; y <= y1 + 1; y++)
+        for (int x = x0 - 1; x <= x1 + 1; x++) {
+            Building* b = g.buildAt(x, y);
+            if (!b || b->def().type != BType::Conveyor || b->tx != x || b->ty != y || !b->blending || b->constructing) continue;
+            const BlockDef& d = b->def();
+            int frame = conveyorFrame(*b);
+            for (int i = 0; i < 4; i++) {
+                if (!(b->blending & (1 << i))) continue;
+                int dir = ((b->rotation - i) % 4 + 4) % 4;
+                float rot = (i == 0 ? b->rotation : dir) * 90.f;
+                static const int dx4[4] = {1, 0, -1, 0}, dy4[4] = {0, 1, 0, -1};
+                worldToScreen(*this, x * tilesize + dx4[dir] * tilesize * 0.75f, y * tilesize + dy4[dir] * tilesize * 0.75f, sx, sy);
+                gfx::sprite(d.sprExtra + frame * 2 + (i != 0 ? 1 : 0), sx, sy, rot);
             }
         }
     // buildings
@@ -415,45 +696,7 @@ void App::drawWorld() {
             worldToScreen(*this, x * tilesize + off, y * tilesize + off, sx, sy);
             uint32_t tint = 0xffffffff; float blend = 0;
             if (b.constructing) { tint = 0xffd37f90; blend = 0.6f; }
-            switch (d.type) {
-                case BType::Conveyor: {
-                    int frame = (!b.constructing && b.clogHeat <= 0.5f && b.len > 0) ? ((int)(g.tick * d.speed * 8.f)) % 4 : 0;
-                    gfx::sprite(d.sprVar + b.blendbits * 4 + frame, sx, sy, b.rotation * 90.f, b.blendsclx, b.blendscly, tint, blend);
-                    break;
-                }
-                case BType::Drill:
-                    gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
-                    if (d.sprRot >= 0) gfx::sprite(d.sprRot, sx, sy, b.timeDrilled * 2.f, 1, 1, tint, blend);
-                    if (d.sprTop >= 0) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, tint, blend);
-                    if (b.dominantItem >= 0 && !b.constructing)
-                        gfx::rect(sx - 2, sy - 2, 4, 4, (kItems[b.dominantItem].color << 8) | 0xff);
-                    break;
-                case BType::ItemTurret: {
-                    gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
-                    float r = b.turretRotation * 0.0174533f, rec = -b.recoil * 1.f * kZoom;
-                    gfx::sprite(d.sprTop, sx + std::cos(r) * rec, sy - std::sin(r) * rec, b.turretRotation - 90, 1, 1, tint, blend);
-                    break;
-                }
-                case BType::Core:
-                    gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
-                    if (d.sprTeam >= 0) gfx::sprite(d.sprTeam, sx, sy, 0, 1, 1, kTeamColor[b.team % 3], 1.f);
-                    break;
-                case BType::Wall: {
-                    int s = d.variants > 0 ? d.sprVar + (int)(hash2(x, y) % (uint32_t)d.variants) : d.spr;
-                    gfx::sprite(s, sx, sy, 0, 1, 1, tint, blend);
-                    break;
-                }
-                case BType::Bridge:
-                    gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
-                    break;
-                default:
-                    if (d.spr >= 0) gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
-                    if (d.sprTop >= 0 && !b.constructing) {
-                        float a = d.type == BType::Battery ? (d.powerBuffer > 0 ? b.powerStored / d.powerBuffer : 0) : b.warmup;
-                        if (a > 0.01f) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, withAlpha(d.type == BType::Battery ? 0xfbd367ff : 0xffffffff, a));
-                    }
-                    break;
-            }
+            drawBlock(b.block, sx, sy, b.rotation, &b, tint, blend);
             if (b.constructing) {
                 float w = d.size * tilesize * kZoom;
                 gfx::rect(sx - w / 2, sy + w / 2 - 2, w * b.buildProgress, 2, kAccent);
@@ -574,24 +817,88 @@ void App::drawWorld() {
         float off = d.size % 2 == 0 ? tilesize / 2 : 0;
         worldToScreen(*this, p.tx * tilesize + off, p.ty * tilesize + off, sx, sy);
         float w = d.size * tilesize * kZoom;
+        if (sx < -w || sx > gfx::TopW + w || sy < -w || sy > gfx::H + w) continue;  // off-screen plan
         if (p.breaking) { gfx::rectLine(sx - w / 2, sy - w / 2, w, w, 1.5f, kRed); continue; }
-        int s = d.type == BType::Conveyor ? d.sprVar : d.type == BType::ItemTurret ? d.sprTop : d.variants ? d.sprVar : d.spr;
-        if (s >= 0) gfx::sprite(s, sx, sy, d.rotate ? p.rotation * 90.f : 0, 1, 1, 0xffffff70, 0);
-        gfx::rectLine(sx - w / 2, sy - w / 2, w, w, 1, 0xffd37f90);
+        // BuildPlan preview: the block as it will look (conveyor curves included), lightly
+        // accent-tinted like Mindustry's plan shader; outline only for non-belt blocks
+        drawBlock(p.block, sx, sy, d.rotate ? p.rotation : 0, nullptr, 0xffd37fd0, 0.25f, p.tx, p.ty);
+        if (d.type != BType::Conveyor) gfx::rectLine(sx - w / 2, sy - w / 2, w, w, 1, 0xffd37f90);
+    }
+    // configuration / hover overlays: laser range, links, candidates (PowerNode.drawConfigure)
+    if (screen == Screen::Game && !hideHud) {
+        auto centre = [&](const Building& o, float& ox, float& oy) {
+            float off = o.def().size % 2 == 0 ? tilesize / 2 : 0;
+            worldToScreen(*this, o.tx * tilesize + off, o.ty * tilesize + off, ox, oy);
+        };
+        auto box = [&](const Building& o, uint32_t c) {
+            float ox, oy; centre(o, ox, oy);
+            float w = o.def().size * tilesize * kZoom;
+            gfx::rectLine(ox - w / 2 - 1, oy - w / 2 - 1, w + 2, w + 2, 1.5f, c);
+        };
+        auto circle = [&](float x, float y, float r, uint32_t c) {
+            for (int k = 0; k < 40; k++) {
+                float a0 = k / 40.f * 6.2831853f, a1 = (k + 1) / 40.f * 6.2831853f;
+                gfx::line(x + std::cos(a0) * r, y + std::sin(a0) * r, x + std::cos(a1) * r, y + std::sin(a1) * r, 1, c);
+            }
+        };
+        Building* sel = configuring >= 0 && g.builds[configuring].alive ? &g.builds[configuring] : g.buildAt(cursorTX, cursorTY);
+        if (sel && sel->team == TeamSharded) {
+            const BlockDef& d = sel->def();
+            float ox, oy; centre(*sel, ox, oy);
+            if (d.type == BType::PowerNode) {
+                circle(ox, oy, d.laserRange * tilesize * kZoom + d.size * tilesize, configuring >= 0 ? kAccent : 0xffd37f80);
+                if (configuring >= 0)
+                    for (auto& o : g.builds)
+                        if (o.alive && o.id != sel->id && g.powerLinkValid(*sel, o, false)) box(o, 0xffffff50);
+                for (int32_t l : sel->links) if (g.builds[l].alive) box(g.builds[l], kAccent);
+            } else if (d.type == BType::Bridge) {
+                for (int dir = 0; dir < 4; dir++)
+                    for (int k = 1; k <= (int)d.range; k++) {
+                        static const int dx4[4] = {1, 0, -1, 0}, dy4[4] = {0, 1, 0, -1};
+                        float bx, by;
+                        worldToScreen(*this, (sel->tx + dx4[dir] * k) * tilesize, (sel->ty + dy4[dir] * k) * tilesize, bx, by);
+                        gfx::rect(bx - 2, by - 2, 4, 4, configuring >= 0 ? 0xffd37fb0 : 0xffd37f50);
+                    }
+                if (sel->link >= 0) { Building* t = g.buildAt(sel->link % g.width, sel->link / g.width); if (t) box(*t, kAccent); }
+            } else if (sel->graph >= 0) {
+                for (auto& o : g.builds)
+                    if (o.alive && o.def().type == BType::PowerNode && std::find(o.links.begin(), o.links.end(), sel->id) != o.links.end()) box(o, kAccent);
+            }
+            if (configuring >= 0) box(*sel, 0xffffffff);
+        }
+        // placing a power block: range and the links it will make (PowerNode.getPotentialLinks)
+        int blk = selectedBlock();
+        if (mode == Mode::Build && configuring < 0 && !g.buildAt(cursorTX, cursorTY) && kBlocks[blk].type == BType::PowerNode) {
+            const BlockDef& d = kBlocks[blk];
+            float px0, py0;
+            worldToScreen(*this, cursorTX * tilesize, cursorTY * tilesize, px0, py0);
+            circle(px0, py0, d.laserRange * tilesize * kZoom + tilesize, 0xffd37f90);
+            for (int32_t l : g.potentialPowerLinks((int16_t)blk, cursorTX, cursorTY, TeamSharded)) {
+                float lx, ly; centre(g.builds[l], lx, ly);
+                gfx::line(px0, py0, lx, ly, 1.5f, 0xfbd367a0);
+                box(g.builds[l], 0xfbd367c0);
+            }
+        }
     }
     // cursor
-    if (screen == Screen::Game) {
+    if (screen == Screen::Game && !hideHud) {
         int px = (int)std::floor(camX / tilesize + 0.5f), py = (int)std::floor(camY / tilesize + 0.5f);
         int cx = px + cursorDX, cy = py + cursorDY;
-        if (mode == Mode::Build) {
+        Building* hover = g.buildAt(cx, cy);
+        if (mode == Mode::Build && hover && (configuring >= 0 || hover->block != selectedBlock() || !kBlocks[hover->block].rotate)) {
+            // over an existing building: selection outline (Mindustry hover), not a red ghost
+            float off = hover->def().size % 2 == 0 ? tilesize / 2 : 0;
+            worldToScreen(*this, hover->tx * tilesize + off, hover->ty * tilesize + off, sx, sy);
+            float w = hover->def().size * tilesize * kZoom;
+            gfx::rectLine(sx - w / 2 - 1, sy - w / 2 - 1, w + 2, w + 2, 1.5f, 0xffffffd0);
+        } else if (mode == Mode::Build) {
             int blk = selectedBlock();
             const BlockDef& d = kBlocks[blk];
             float off = d.size % 2 == 0 ? tilesize / 2 : 0;
             worldToScreen(*this, cx * tilesize + off, cy * tilesize + off, sx, sy);
             bool ok = g.validPlace((int16_t)blk, cx, cy, rotation, TeamSharded);
             float w = d.size * tilesize * kZoom;
-            int s = d.type == BType::Conveyor ? d.sprVar : d.type == BType::ItemTurret ? d.sprTop : d.variants ? d.sprVar : d.spr;
-            if (s >= 0) gfx::sprite(s, sx, sy, d.rotate ? rotation * 90.f : 0, 1, 1, ok ? 0xffffffa0 : 0xe55454a0, ok ? 0 : 0.5f);
+            drawBlock(blk, sx, sy, d.rotate ? rotation : 0, nullptr, ok ? 0xffffffa0 : 0xe55454a0, ok ? 0 : 0.5f, cx, cy);
             gfx::rectLine(sx - w / 2 - 1, sy - w / 2 - 1, w + 2, w + 2, 1.5f, ok ? kAccent : kRed);
             if (d.rotate) {
                 float r = rotation * 1.5707963f;
@@ -660,7 +967,10 @@ void App::drawBottom() {
     gfx::begin(gfx::Bottom, 0x1a1a1aff);
     if (screen == Screen::Pause) {
         const char* items[3] = {"resume", "savequit", "quit"};
-        gfx::text(160, 24, 0.7f, kAccent, lang.ui("paused").c_str(), 1);
+        gfx::text(160, 18, 0.7f, kAccent, lang.ui("paused").c_str(), 1);
+        // measured on this console: frames per second, CPU time of the simulation and of the draw calls
+        std::snprintf(buf, sizeof buf, "%.1f FPS   sim %.1f ms   %s %.1f ms", perf.fps, perf.simMs, lang.ui("drawcpu").c_str(), perf.drawMs);
+        gfx::text(160, 48, 0.4f, kGray, buf, 1);
         for (int i = 0; i < 3; i++) {
             float y = 70 + i * 44;
             gfx::rect(30, y, 260, 38, i == pauseIndex ? kPanelLight : kPanel);
@@ -681,20 +991,20 @@ void App::drawBottom() {
     gfx::rect(238, 1, 80, 18, kPanelLight);
     gfx::text(278, 3, 0.4f, 0xffffffff, lang.ui("nextwave").c_str(), 1);
 
-    // core items (CoreItemsDisplay)
+    // core items (CoreItemsDisplay): 16 px item icons, drawn 1:1
     Building* c = g.core(TeamSharded);
     if (c) {
         int col = 0, row = 0;
         for (int i = 0; i < ITEM_COUNT; i++) {
             if (c->items.amount[i] <= 0) continue;
-            float x = 4 + col * 79, y = 24 + row * 16;
-            gfx::sprite(kItems[i].spr, x + 7, y + 7, 0, 0.85f, 0.85f);
+            float x = 4 + col * 79, y = 22 + row * 16;
+            gfx::sprite(kItems[i].spr, x + 8, y + 8);
             std::snprintf(buf, sizeof buf, "%d", (int)c->items.amount[i]);
-            gfx::text(x + 17, y, 0.4f, 0xffffffff, buf);
+            gfx::text(x + 19, y + 1, 0.4f, 0xffffffff, buf);
             if (++col == 4) { col = 0; if (++row == 2) break; }
         }
     }
-    // category tabs
+    // category tabs: icon of the first block, 16x16 composite (Block.icons())
     auto cats = usedCategories();
     int tw = cats.empty() ? 320 : 320 / (int)cats.size();
     for (size_t i = 0; i < cats.size(); i++) {
@@ -703,48 +1013,48 @@ void App::drawBottom() {
         gfx::rect(x + 1, kTabY, tw - 2, kTabH, sel ? kPanelLight : kPanel);
         if (sel) gfx::rect(x + 1, kTabY + kTabH - 2, tw - 2, 2, kAccent);
         auto list = blocksIn(cats[i]);
-        if (!list.empty()) {
-            const BlockDef& d = kBlocks[list[0]];
-            int s = d.type == BType::Conveyor ? d.sprVar : d.type == BType::ItemTurret ? d.sprTop : d.variants ? d.sprVar : d.spr;
-            if (s >= 0) { float sc = 18.f / std::max(gfx::spriteW(s), gfx::spriteH(s)); gfx::sprite(s, x + tw / 2.f, kTabY + kTabH / 2.f, 0, sc, sc); }
-        }
+        if (!list.empty() && kBlocks[list[0]].sprIcon >= 0)
+            gfx::sprite(kBlocks[list[0]].sprIcon + 1, x + tw / 2.f, kTabY + (kTabH - 2) / 2.f);
     }
-    // block grid
+    // block grid: 32x32 composite icons at 1:1
     auto list = blocksIn(category);
     int selIndex = std::clamp(selected[category], 0, std::max(0, (int)list.size() - 1));
     for (size_t i = 0; i < list.size() && i < 14; i++) {
-        float x = (i % kCols) * kCellW + 2, y = kGridY + (i / kCols) * kCellH;
+        float x = (i % kCols) * kCellW + 3, y = kGridY + (i / kCols) * kCellH;
         const BlockDef& d = kBlocks[list[i]];
         bool afford = c != nullptr;
         for (int r = 0; r < d.nreq && c; r++) if (c->items.amount[d.req[r].item] < d.req[r].amount) afford = false;
         bool sel = (int)i == selIndex && mode == Mode::Build;
-        gfx::rect(x, y, kCellW - 3, kCellH - 3, sel ? kPanelLight : kPanel);
-        if (sel) gfx::rectLine(x, y, kCellW - 3, kCellH - 3, 2, kAccent);
-        int s = d.type == BType::Conveyor ? d.sprVar : d.type == BType::ItemTurret ? d.sprTop : d.variants ? d.sprVar : d.spr;
-        if (s >= 0) {
-            float sc = 28.f / std::max(gfx::spriteW(s), gfx::spriteH(s));
-            if (sc > 1.75f) sc = 1.75f;
-            gfx::sprite(s, x + (kCellW - 3) / 2.f, y + (kCellH - 3) / 2.f, 0, sc, sc, afford ? 0xffffffff : 0x808080ff, afford ? 0 : 0.5f);
-        }
+        gfx::rect(x, y, kCellW - 4, kCellH - 3, sel ? kPanelLight : kPanel);
+        if (sel) gfx::rectLine(x, y, kCellW - 4, kCellH - 3, 2, kAccent);
+        if (d.sprIcon >= 0)
+            gfx::sprite(d.sprIcon, x + (kCellW - 4) / 2.f, y + (kCellH - 3) / 2.f, 0, 1, 1,
+                        afford ? 0xffffffff : 0x9a9a9aff, afford ? 0 : 0.55f);  // Pal.gray tint when unaffordable
     }
-    // selected block info: localized name + requirements (have/need)
+    // configured or hovered building: status sheet (Building.status / BlockStatus)
+    Building* insp = configuring >= 0 && g.builds[configuring].alive ? &g.builds[configuring] : g.buildAt(cursorTX, cursorTY);
+    if (insp && insp->team != TeamCrux && mode != Mode::Mine) {
+        drawInspect(*insp);
+    } else
+    // selected block sheet: same icon, localized name, category, requirements (have/need)
     if (!list.empty()) {
         int blk = list[selIndex];
         const BlockDef& d = kBlocks[blk];
-        gfx::rect(0, 166, 320, 44, kPanel);
-        gfx::text(4, 168, 0.45f, kAccent, lang.blockName(blk).c_str());
-        gfx::text(316, 169, 0.38f, kGray, (lang.code == "fr" ? kCategoryFr : kCategoryEn)[category], 2);
-        float x = 4;
+        gfx::rect(0, kInfoY, 320, 45, kPanel);
+        if (d.sprIcon >= 0) gfx::sprite(d.sprIcon, 21, kInfoY + 22);
+        gfx::text(42, kInfoY + 2, 0.45f, kAccent, lang.blockName(blk).c_str());
+        gfx::text(316, kInfoY + 3, 0.38f, kGray, (lang.code == "fr" ? kCategoryFr : kCategoryEn)[category], 2);
+        float x = 42;
         for (int r = 0; r < d.nreq; r++) {
             int it = d.req[r].item;
             bool ok = c && c->items.amount[it] >= d.req[r].amount;
-            gfx::sprite(kItems[it].spr, x + 7, 196, 0, 0.8f, 0.8f);
+            gfx::sprite(kItems[it].spr, x + 8, kInfoY + 32);
             std::snprintf(buf, sizeof buf, "%d", d.req[r].amount);
-            gfx::text(x + 16, 189, 0.42f, ok ? 0xffffffff : kRed, buf);
-            x += 22 + gfx::textWidth(buf, 0.42f);
+            gfx::text(x + 18, kInfoY + 24, 0.42f, ok ? 0xffffffff : kRed, buf);
+            x += 26 + gfx::textWidth(buf, 0.42f);
         }
-        if (d.powerUse > 0) { std::snprintf(buf, sizeof buf, "-%.0f/s", d.powerUse * 60); gfx::text(316, 189, 0.4f, 0xfbd367ff, buf, 2); }
-        if (d.powerProduction > 0) { std::snprintf(buf, sizeof buf, "+%.0f/s", d.powerProduction * 60); gfx::text(316, 189, 0.4f, 0xfbd367ff, buf, 2); }
+        if (d.powerUse > 0) { std::snprintf(buf, sizeof buf, "-%.0f/s", d.powerUse * 60); gfx::text(316, kInfoY + 24, 0.4f, 0xfbd367ff, buf, 2); }
+        if (d.powerProduction > 0) { std::snprintf(buf, sizeof buf, "+%.0f/s", d.powerProduction * 60); gfx::text(316, kInfoY + 24, 0.4f, 0xfbd367ff, buf, 2); }
     }
     // mode buttons
     const char* modes[4] = {"build", "break", "mine", "rotate"};

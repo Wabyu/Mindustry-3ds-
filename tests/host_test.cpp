@@ -1,5 +1,7 @@
 // Host-side regression tests for the native simulation.
 // Expected values are derived from upstream formulas (see comments).
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -190,6 +192,246 @@ static void testSaveRoundTrip() {
     CHECK(again.size() == bytes.size(), "re-saving gives the same size (%zu)", again.size());
 }
 
+// ---------------------------------------------------------------- conveyors (Conveyor / Autotiler)
+static const int cdx[4] = {1, 0, -1, 0}, cdy[4] = {0, 1, 0, -1};
+
+static bool inject(Game& g, int x, int y, int fromDir, int item) {
+    Building* b = g.buildAt(x, y);
+    if (!b) return false;
+    Building fake; fake.alive = true; fake.block = B_router; fake.team = TeamSharded;
+    fake.tx = x + cdx[fromDir]; fake.ty = y + cdy[fromDir];
+    if (!g.acceptItem(*b, fake, item)) return false;
+    g.handleItem(*b, fake, item);
+    return true;
+}
+
+static long itemsInWorld(Game& g) {
+    long n = 0;
+    for (auto& b : g.builds) if (b.alive) {
+        if (b.def().type == BType::Conveyor) n += b.len;
+        else if (b.def().type != BType::Core) n += b.items.total;
+        for (int d = 0; d < 4; d++) n += (long)b.jitem[d].size();
+        n += (long)b.bufItem.size();
+    }
+    for (int i = 0; i < ITEM_COUNT; i++) n += g.itemsDelivered[i];
+    return n;
+}
+
+static void testConveyorDirections() {
+    for (int r = 0; r < 4; r++) {
+        Game g; emptyMap(g, 30, 30); g.spawnPlayer = false;
+        int cx = 15 + cdx[r] * 8, cy = 15 + cdy[r] * 8;
+        g.addBuilding(B_core_shard, cx, cy, TeamSharded, 0);
+        int sx = 15 - cdx[r] * 6, sy = 15 - cdy[r] * 6;
+        for (int k = 0; k < 13; k++) g.addBuilding(B_conveyor, sx + cdx[r] * k, sy + cdy[r] * k, TeamSharded, r);
+        long in = 0;
+        for (int t = 0; t < 60 * 30; t++) { if (inject(g, sx, sy, (r + 2) % 4, I_copper)) in++; g.update(1.f); }
+        long out = g.itemsDelivered[I_copper];
+        CHECK(out > 0 && itemsInWorld(g) == in, "direction %d: %ld in, %ld delivered, nothing lost or duplicated", r * 90, in, out);
+    }
+}
+
+static void testConveyorTiling() {
+    // Expected (blendbits, blendscly) from Autotiler.buildBlending + transformCase, where
+    // blends(1) looks at rotation-1 and blends(3) at rotation+1.
+    // feeds mask: bit0 = feeder on side rotation+1, bit1 = back, bit2 = side rotation-1
+    struct Case { int feeds, bits, scly; const char* name; };
+    const Case cases[] = {{2, 0, 1, "straight"}, {1, 1, 1, "rot+1 side only (case 5)"}, {4, 1, -1, "rot-1 side only (case 4)"},
+                          {5, 4, 1, "both sides (case 1)"}, {3, 2, -1, "back + rot+1 (case 3)"}, {6, 2, 1, "back + rot-1 (case 2)"},
+                          {7, 3, 1, "cross (case 0)"}};
+    int good = 0, total = 0;
+    for (int r = 0; r < 4; r++)
+        for (auto& c : cases) {
+            Game g; emptyMap(g, 12, 12); g.spawnPlayer = false;
+            g.addBuilding(B_conveyor, 6, 6, TeamSharded, r);
+            const int dirs[3] = {(r + 1) % 4, (r + 2) % 4, (r + 3) % 4};
+            for (int k = 0; k < 3; k++) if (c.feeds & (1 << k))
+                g.addBuilding(B_conveyor, 6 + cdx[dirs[k]], 6 + cdy[dirs[k]], TeamSharded, (dirs[k] + 2) % 4);
+            Building* b = g.buildAt(6, 6);
+            total++;
+            if (b->blendbits == c.bits && b->blendscly == c.scly) good++;
+            else std::printf("  rot %d %s: bits %d scly %d\n", r, c.name, b->blendbits, b->blendscly);
+        }
+    CHECK(good == total, "Autotiler cases x 4 directions: %d/%d match buildBlending/transformCase", good, total);
+    // a side neighbour that does not output toward the belt must not bend it
+    Game g; emptyMap(g, 12, 12); g.spawnPlayer = false;
+    g.addBuilding(B_conveyor, 6, 6, TeamSharded, 0);
+    g.addBuilding(B_conveyor, 6, 7, TeamSharded, 1);  // above, flowing away
+    CHECK(g.buildAt(6, 6)->blendbits == 0, "parallel neighbour flowing away keeps a straight belt");
+    // multi-tile source: a drill touching the side bends the belt (Drill outputs items, not rotated)
+    g.addBuilding(B_mechanical_drill, 6, 3, TeamSharded, 0);  // tiles 6..7 x 3..4: one tile gap below the belt
+    CHECK(g.buildAt(6, 6)->blendbits == 0, "drill one tile away does not bend the belt");
+    Game h; emptyMap(h, 12, 12); h.spawnPlayer = false;
+    h.addBuilding(B_conveyor, 6, 6, TeamSharded, 0);
+    h.addBuilding(B_mechanical_drill, 5, 4, TeamSharded, 0);  // tiles 5..6 x 4..5: touches the rot-1 side
+    CHECK(h.buildAt(6, 6)->blendbits == 1 && h.buildAt(6, 6)->blendscly == -1, "2x2 drill touching the rot-1 side gives the case-4 curve (bits %d scly %d)",
+          h.buildAt(6, 6)->blendbits, h.buildAt(6, 6)->blendscly);
+    // joints toward non-square sprites (Autotiler blendresult[4])
+    Game j; emptyMap(j, 12, 12); j.spawnPlayer = false;
+    j.addBuilding(B_sorter, 5, 6, TeamSharded, 0);
+    j.addBuilding(B_conveyor, 6, 6, TeamSharded, 0);
+    j.addBuilding(B_router, 7, 6, TeamSharded, 0);
+    Building* m = j.buildAt(6, 6);
+    CHECK((m->blending & 4) && !(m->blending & 1), "joint drawn toward the sorter behind (non-square), not toward the router (square): %d", m->blending);
+    // the frame keeps animating on an empty belt (Conveyor.draw uses enabled/clogHeat only)
+    CHECK(m->len == 0 && conveyorFrame(*m, 0) != conveyorFrame(*m, 10.f / (0.03f * 8.f)), "empty belt still animates");
+    m->clogHeat = 1;
+    CHECK(conveyorFrame(*m, 10.f / (0.03f * 8.f)) == 0, "clogged belt shows frame 0");
+}
+
+static void testConveyorMerging() {
+    Game g; emptyMap(g, 30, 20); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 25, 10, TeamSharded, 0);
+    for (int x = 5; x <= 23; x++) g.addBuilding(B_conveyor, x, 10, TeamSharded, 0);
+    for (int y = 4; y <= 9; y++) g.addBuilding(B_conveyor, 12, y, TeamSharded, 1);     // from below
+    for (int y = 16; y >= 11; y--) g.addBuilding(B_conveyor, 14, y, TeamSharded, 3);   // from above
+    long in = 0;
+    for (int t = 0; t < 60 * 40; t++) {
+        if (inject(g, 5, 10, 2, I_copper)) in++;
+        if (inject(g, 12, 4, 3, I_lead)) in++;
+        if (inject(g, 14, 16, 1, I_scrap)) in++;
+        g.update(1.f);
+    }
+    long out = g.itemsDelivered[I_copper] + g.itemsDelivered[I_lead] + g.itemsDelivered[I_scrap];
+    float rate = g.itemsDelivered[I_copper] + g.itemsDelivered[I_lead] + g.itemsDelivered[I_scrap];
+    rate /= 30.f;
+    CHECK(itemsInWorld(g) == in, "3 merging belts: %ld items in, conserved (%ld delivered)", in, out);
+    CHECK(g.itemsDelivered[I_lead] > 0 && g.itemsDelivered[I_scrap] > 0 && g.itemsDelivered[I_copper] > 0, "every input reaches the core (side inputs insert at mid)");
+    CHECK(rate < 8.5f, "merged throughput %.1f items/s stays bounded by one belt", rate);
+}
+
+static void testConveyorJunctionTitanium() {
+    Game g; emptyMap(g, 40, 30); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 30, 10, TeamSharded, 0);
+    g.addBuilding(B_core_shard, 15, 25, TeamSharded, 0);
+    for (int x = 3; x <= 28; x++) {
+        int16_t blk = x < 10 ? B_conveyor : x < 20 ? B_titanium_conveyor : B_conveyor;
+        if (x == 15) g.addBuilding(B_junction, x, 10, TeamSharded, 0);
+        else g.addBuilding(blk, x, 10, TeamSharded, 0);
+    }
+    for (int y = 3; y <= 23; y++) if (y != 10) g.addBuilding(B_conveyor, 15, y, TeamSharded, 1);
+    long in = 0;
+    for (int t = 0; t < 60 * 40; t++) {
+        if (inject(g, 3, 10, 2, I_copper)) in++;
+        if (inject(g, 15, 3, 3, I_lead)) in++;
+        g.update(1.f);
+    }
+    CHECK(g.itemsDelivered[I_copper] > 50 && g.itemsDelivered[I_lead] > 50, "junction crossing: %ld copper east, %ld lead north",
+          g.itemsDelivered[I_copper], g.itemsDelivered[I_lead]);
+    CHECK(itemsInWorld(g) == in, "basic -> titanium -> junction -> basic: %ld items conserved", in);
+}
+
+static void testConveyorClogAndResume() {
+    Game g; emptyMap(g, 30, 10); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 25, 5, TeamSharded, 0);
+    for (int x = 3; x <= 10; x++) g.addBuilding(B_conveyor, x, 5, TeamSharded, 0);  // ends at nothing
+    for (int t = 0; t < 60 * 20; t++) { inject(g, 3, 5, 2, I_copper); g.update(1.f); }
+    Building* last = g.buildAt(10, 5);
+    CHECK(last->len == 3 && last->clogHeat > 0.5f, "dead end: belt fills up (len %d) and clogs (heat %.2f)", last->len, last->clogHeat);
+    long held = itemsInWorld(g);
+    for (int x = 11; x <= 23; x++) g.addBuilding(B_conveyor, x, 5, TeamSharded, 0);
+    for (int t = 0; t < 60 * 20; t++) g.update(1.f);
+    CHECK(g.itemsDelivered[I_copper] == held && itemsInWorld(g) == held, "extended belt resumes: all %ld held items delivered", held);
+}
+
+static void testConveyorEditing() {
+    Game g; emptyMap(g, 30, 10);
+    int core = g.addBuilding(B_core_shard, 25, 5, TeamSharded, 0);
+    g.builds[core].items.add(I_copper, 500); g.builds[core].items.add(I_lead, 50); g.builds[core].items.add(I_titanium, 50);
+    for (int x = 3; x <= 12; x++) g.addBuilding(B_conveyor, x, 5, TeamSharded, 0);
+    for (int t = 0; t < 60 * 3; t++) { inject(g, 3, 5, 2, I_copper); g.update(1.f); }
+    long before = itemsInWorld(g);
+    int copper = g.builds[core].items.amount[I_copper];
+    // rotate a loaded belt in place (Block.quickRotate): free, items kept
+    int lenBefore = g.buildAt(8, 5)->len;
+    g.queuePlan(8, 5, B_conveyor, 1, false);
+    CHECK(g.buildAt(8, 5)->rotation == 1 && g.buildAt(8, 5)->len == lenBefore && g.builds[core].items.amount[I_copper] == copper,
+          "quick rotate keeps %d items and costs nothing", lenBefore);
+    CHECK(g.plans.empty(), "rotating a finished belt queues no construction");
+    g.queuePlan(8, 5, B_conveyor, 0, false);
+    // upgrade to titanium: ConveyorBuild.overwrote keeps the items; titanium cost is charged once
+    int lenUp = g.buildAt(9, 5)->len;
+    g.spawnPlayer = true;
+    g.queuePlan(9, 5, B_titanium_conveyor, 0, false);
+    CHECK(!g.plans.empty(), "upgrade queued");
+    for (int i = 0; i < 300; i++) { g.update(1.f); g.updatePlayer(1.f, 0, 0); if (g.plans.empty()) break; }
+    Building* up = g.buildAt(9, 5);
+    CHECK(up && up->block == B_titanium_conveyor && !up->constructing, "belt upgraded to titanium");
+    (void)lenUp;
+    CHECK(g.builds[core].items.amount[I_titanium] == 49 && g.builds[core].items.amount[I_lead] == 49,
+          "titanium conveyor cost charged once (titanium %d, lead %d)", (int)g.builds[core].items.amount[I_titanium], (int)g.builds[core].items.amount[I_lead]);
+    // re-placing the same tile/rotation must not charge again
+    int cu = g.builds[core].items.amount[I_copper];
+    g.queuePlan(9, 5, B_titanium_conveyor, 0, false);
+    for (int i = 0; i < 60; i++) { g.update(1.f); g.updatePlayer(1.f, 0, 0); }
+    CHECK(g.builds[core].items.amount[I_copper] >= cu - 0 && g.builds[core].items.amount[I_titanium] == 49, "re-placing an identical belt is free");
+    (void)before;
+}
+
+static void testPowerConfigAndStatus() {
+    Game g; emptyMap(g, 40, 30); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 35, 25, TeamSharded, 0);
+    int node = g.addBuilding(B_power_node, 10, 10, TeamSharded, 0);
+    int solar = g.addBuilding(B_solar_panel, 14, 10, TeamSharded, 0);
+    int smelter = g.addBuilding(B_silicon_smelter, 10, 14, TeamSharded, 0);
+    int far = g.addBuilding(B_solar_panel, 30, 10, TeamSharded, 0);
+    g.update(1.f);
+    CHECK(g.status(g.builds[smelter]).reason == Reason::MissingItem, "smelter without items: missing ingredient");
+    g.builds[smelter].items.add(I_coal, 5); g.builds[smelter].items.add(I_sand, 10);
+    g.update(1.f);
+    CHECK(g.status(g.builds[smelter]).reason == Reason::Unpowered, "smelter with items but no network: not connected");
+    CHECK(g.togglePowerLink(node, solar) && g.togglePowerLink(node, smelter), "manual links node -> solar, node -> smelter");
+    CHECK(!g.togglePowerLink(node, far), "out of laser range (6 tiles) refused");
+    for (int i = 0; i < 30; i++) g.update(1.f);
+    // solar 0.1/tick vs smelter 0.5/tick: 20% satisfaction (PowerGraph)
+    StatusInfo st = g.status(g.builds[smelter]);
+    const GraphStats& gs = g.graphStats[g.builds[node].graph];
+    CHECK(st.reason == Reason::LowPower && std::fabs(st.value - 0.2f) < 0.01f, "smelter at %.0f%% power (solar 6/s for 30/s)", st.value * 100);
+    CHECK(std::fabs(gs.produced - 0.1f) < 1e-4f && std::fabs(gs.needed - 0.5f) < 1e-4f, "network balance +%.2f -%.2f per tick", gs.produced, gs.needed);
+    CHECK(g.togglePowerLink(node, solar) && std::find(g.builds[node].links.begin(), g.builds[node].links.end(), solar) == g.builds[node].links.end(),
+          "tapping a linked building unlinks it");
+    // battery: charges from a surplus, discharges into a deficit
+    Game h; emptyMap(h, 40, 30); h.spawnPlayer = false;
+    h.addBuilding(B_core_shard, 35, 25, TeamSharded, 0);
+    int n2 = h.addBuilding(B_power_node, 10, 10, TeamSharded, 0);
+    int bat = h.addBuilding(B_battery, 11, 10, TeamSharded, 0);  // touching the node: conducts
+    int sol = h.addBuilding(B_solar_panel, 12, 10, TeamSharded, 0);
+    (void)n2; (void)sol;
+    for (int i = 0; i < 60; i++) h.update(1.f);
+    CHECK(h.status(h.builds[bat]).reason == Reason::Charging && h.builds[bat].powerStored > 5.f, "battery charging from a solar surplus (%.1f stored)", h.builds[bat].powerStored);
+    int sm = h.addBuilding(B_silicon_smelter, 9, 7, TeamSharded, 0);
+    h.builds[sm].items.add(I_coal, 10); h.builds[sm].items.add(I_sand, 20);
+    h.togglePowerLink(n2, sm);
+    for (int i = 0; i < 10; i++) h.update(1.f);
+    CHECK(h.status(h.builds[bat]).reason == Reason::Discharging, "battery discharging into the smelter");
+    // double tap: clear every link, then auto-link again (PowerNode.onConfigureBuildTapped)
+    int links = (int)h.builds[n2].links.size();
+    h.autoOrClearLinks(n2);
+    CHECK(links > 0 && h.builds[n2].links.empty(), "double tap with links clears them (%d -> 0)", links);
+    h.autoOrClearLinks(n2);
+    CHECK(!h.builds[n2].links.empty(), "double tap without links finds potential links (%zu)", h.builds[n2].links.size());
+    // max nodes = 10 (Blocks.powerNode)
+    Game m; emptyMap(m, 40, 30); m.spawnPlayer = false;
+    m.addBuilding(B_core_shard, 35, 25, TeamSharded, 0);
+    int hub = m.addBuilding(B_power_node, 15, 15, TeamSharded, 0);
+    int ok = 0;
+    for (int k = 0; k < 12; k++) {
+        int o = m.addBuilding(B_solar_panel, 10 + (k % 6) * 2, k < 6 ? 12 : 18, TeamSharded, 0);
+        if (m.togglePowerLink(hub, o)) ok++;
+    }
+    CHECK(ok == 10, "power node accepts %d links (maxNodes 10)", ok);
+    // generator without fuel
+    int gen = m.addBuilding(B_combustion_generator, 20, 20, TeamSharded, 0);
+    m.update(1.f);
+    CHECK(m.status(m.builds[gen]).reason == Reason::NoFuel, "combustion generator without coal: no fuel");
+    // bridges: in line and within range only
+    int b1 = m.addBuilding(B_bridge_conveyor, 5, 5, TeamSharded, 0);
+    int b2 = m.addBuilding(B_bridge_conveyor, 9, 5, TeamSharded, 0);
+    int b3 = m.addBuilding(B_bridge_conveyor, 10, 6, TeamSharded, 0);
+    CHECK(m.toggleBridgeLink(b1, b2) && !m.toggleBridgeLink(b2, b3), "bridge links in line (4 tiles), not diagonally");
+    CHECK(m.toggleBridgeLink(b1, b2) && m.builds[b1].link < 0, "tapping the linked bridge again unlinks");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) romfs = argv[1];
     testDrillToCore();
@@ -199,6 +441,13 @@ int main(int argc, char** argv) {
     testBuildPlan();
     testMaps();
     testSaveRoundTrip();
+    testConveyorDirections();
+    testConveyorTiling();
+    testConveyorMerging();
+    testConveyorJunctionTitanium();
+    testConveyorClogAndResume();
+    testConveyorEditing();
+    testPowerConfigAndStatus();
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "OK", failures);
     return failures ? 1 : 0;
 }

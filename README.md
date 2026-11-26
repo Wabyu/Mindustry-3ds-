@@ -10,6 +10,8 @@ Ce dépôt prend la suite de Forge3DS 1.4.6. Forge3DS était une réimplémentat
 
 *Captures produites sur PC par `tests/screenshot.cpp`. Ce sont les vraies commandes de dessin du jeu, composées avec les sprites générés. Seule la police diffère de celle de la console.*
 
+**Nouveautés 0.2** : correction des artefacts visuels (sprites en miroir décalés par citro2d, halos de réduction, alignement au pixel, bordures d'atlas), icônes composites officielles, convoyeurs fidèles à `Conveyor`/`Autotiler` (raccords, animation, aperçu des virages), configuration des nœuds et ponts, états des machines et bilan électrique, panneaux solaires, pulvérisateur et mélangeurs, mesure FPS dans le menu pause. Détails et preuves : [docs/AMELIORATIONS_0.2.md](docs/AMELIORATIONS_0.2.md) ; inventaire Forge3DS : [docs/FORGE3DS_INVENTAIRE.md](docs/FORGE3DS_INVENTAIRE.md).
+
 ## Ce qui vient de Mindustry original
 
 | Élément | Source upstream | Traitement |
@@ -41,7 +43,7 @@ Il n'existe pas de JVM pour la 3DS, et le jeu de bureau dépasse de loin les 64 
 
 ## Ce qui n'est pas encore porté
 
-Liquides et pompes, usines d'unités et reconstructeurs, arbre de recherche et lancement entre secteurs, processeurs logiques (les processeurs de Ground Zero sont ignorés : le minuteur des vagues démarre directement), météo, brouillard, effets de statut, bonus d'eau des foreuses, Erekir. Les blocs non portés présents sur les cartes sont retirés au chargement (la liste figure dans `build/gen/assets_report.json`). Les sauvegardes utilisent un format propre au portage et ne sont pas compatibles avec les `.msav` de Mindustry.
+Liquides et pompes (donc générateur à vapeur), usines d'unités et reconstructeurs, arbre de recherche et lancement entre secteurs, processeurs logiques (les processeurs de Ground Zero sont ignorés : le minuteur des vagues démarre directement), météo, brouillard, effets de statut, bonus d'eau des foreuses, Erekir. Les blocs non portés présents sur les cartes sont retirés au chargement (la liste figure dans `build/gen/assets_report.json`). Les sauvegardes utilisent un format propre au portage et ne sont pas compatibles avec les `.msav` de Mindustry.
 
 ## Commandes
 
@@ -49,14 +51,15 @@ Liquides et pompes, usines d'unités et reconstructeurs, arbre de recherche et l
 |---|---|
 | Stick circulaire | piloter l'alpha (la caméra suit) |
 | Croix directionnelle | déplacer le curseur de construction, avec répétition |
-| A | poser le bloc ; maintenir A et bouger le curseur pour tracer une ligne de convoyeurs, orientée selon le tracé |
+| A | poser le bloc ; maintenir A et bouger le curseur pour tracer une ligne de convoyeurs, orientée selon le tracé (aperçu des virages) |
+| A sur un nœud, un pont ou un trieur | le configurer : A sur une cible pour lier/délier, A sur le nœud lui-même = liens automatiques ou tout délier, L/R = objet trié, B = terminer |
 | B | démolir sous le curseur |
 | X | tourner le bloc |
 | Y | miner le minerai sous le curseur (appuyer à nouveau pour arrêter) |
 | L / R | bloc précédent / suivant dans la catégorie |
 | SELECT | catégorie suivante |
-| START | pause : reprendre, sauvegarder et quitter, quitter |
-| Écran tactile | catégories, blocs, modes Construire / Démolir / Miner, « Vague suiv. » |
+| START | pause : reprendre, sauvegarder et quitter, quitter ; affiche aussi les FPS et le temps CPU mesurés |
+| Écran tactile | catégories, blocs, modes Construire / Démolir / Miner, « Vague suiv. » ; le curseur sur un bâtiment affiche sa fiche (état, raison, réseau) |
 
 Les secteurs se débloquent dans l'ordre de la campagne : capturer un secteur, c'est survivre jusqu'à sa vague de capture, puis le suivant s'ouvre. Une sauvegarde automatique a lieu toutes les 2 minutes et à la fermeture, dans `SD:/3ds/mindustry-3ds/`.
 
@@ -75,6 +78,7 @@ cd mindustry-3ds-
 # devkitPro (groupe 3ds-dev) + Python 3 avec Pillow
 make            # génère build/gen, romfs/ depuis upstream/Mindustry, puis mindustry-3ds.3dsx
 make test       # tests de simulation sur PC (AddressSanitizer + UBSan)
+make scenes     # scènes de contrôle visuel composées avec le vrai atlas (build/scenes/*.png)
 bash tools/install_cia_tools.sh && source .cia-tools/env.sh && make cia
 ```
 
@@ -92,9 +96,10 @@ cia/                 RSF, bannière, son
 
 ## État de validation
 
-- 49 vérifications hôte passent : débits, recettes, énergie, combat, construction, chargement des 5 cartes officielles, chemins des ennemis et sauvegardes.
+- 88 vérifications hôte passent : débits, recettes, énergie (liens, plafond de 10, états, batteries), convoyeurs (4 directions, 28 cas de raccord, fusions, jonction, titane, embouteillage, rotation et amélioration sans perte), combat, construction, 5 cartes officielles et sauvegardes.
+- Scènes de contrôle visuel : 0 sprite à 0°/90° posé entre deux pixels, 0 texel lu hors de son sprite, panoramiques lents et diagonaux identiques au pixel près. Ce sont des compositions hôte des appels citro2d, pas des captures de la console.
 - Le `.3dsx` et le `.cia` compilent pour ARM11 (`-march=armv6k`). Le CIA passe une vérification statique : NCCH, exheader, mode 64 Mo, priorité et pile.
-- **Pas encore testé sur une vraie console ni dans un émulateur.** Les FPS sur Old 3DS ne sont pas mesurés. Les points à surveiller sont le recalcul du champ de flux, limité aux blocs solides et espacé de 1,5 s, et le nombre de sprites dessinés par image.
+- La version 0.1 démarre et tourne de façon fluide sur une Old 3DS XL réelle (retour qualitatif). **La 0.2 reste à essayer sur console**, avec relevé des FPS du menu pause.
 
 ## Licence
 

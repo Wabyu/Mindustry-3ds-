@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "gfx.hpp"
+#include "gfx_quad.hpp"
 #include "platform.hpp"
 #include "sprites_gen.hpp"
 
@@ -34,12 +35,16 @@ void begin(Screen s, uint32_t clear) {
 }
 void sprite(int id, float x, float y, float rot, float sx, float sy, uint32_t color, float blend) {
     if (id < 0 || id >= MDT_SPRITE_COUNT) return;
-    char b[200];
-    std::snprintf(b, sizeof b, "{\"op\":\"sprite\",\"id\":%d,\"x\":%.2f,\"y\":%.2f,\"rot\":%.2f,\"sx\":%.3f,\"sy\":%.3f,\"color\":%u,\"blend\":%.3f}",
-                  id, x, y, rot, sx, sy, color, blend);
+    // record the exact C2D_DrawParams the 3DS backend would send
+    QuadParams q = spriteQuad(kSpriteRefs[id][2], kSpriteRefs[id][3], x, y, rot, sx, sy);
+    char b[260];
+    std::snprintf(b, sizeof b, "{\"op\":\"sprite\",\"id\":%d,\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f,\"cx\":%.4f,\"cy\":%.4f,\"angle\":%.7f,\"color\":%u,\"blend\":%.3f}",
+                  id, q.x, q.y, q.w, q.h, q.cx, q.cy, q.angle, color, blend);
     emit(b);
 }
 void rect(float x, float y, float w, float h, uint32_t c) {
+    snapRect(x, y, w, h);
+    if (w <= 0 || h <= 0) return;
     char b[160]; std::snprintf(b, sizeof b, "{\"op\":\"rect\",\"x\":%.2f,\"y\":%.2f,\"w\":%.2f,\"h\":%.2f,\"color\":%u}", x, y, w, h, c); emit(b);
 }
 void line(float x0, float y0, float x1, float y1, float width, uint32_t c) {
@@ -82,5 +87,8 @@ std::string dataPath(const std::string& rel) { return hostgfx::data + "/" + rel;
 std::string languageCode() { return hostgfx::lang; }
 uint64_t millis() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+uint64_t micros() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 }  // namespace platform

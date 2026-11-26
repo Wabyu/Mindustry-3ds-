@@ -7,6 +7,7 @@
 #include <cstring>
 #include "app.hpp"
 #include "gfx.hpp"
+#include "gfx_quad.hpp"
 #include "sprites_gen.hpp"
 
 // ---------------------------------------------------------------- gfx backend
@@ -31,12 +32,12 @@ void begin(Screen s, uint32_t clear) {
 void sprite(int id, float x, float y, float rot, float sx, float sy, uint32_t color, float blend) {
     if (id < 0 || id >= MDT_SPRITE_COUNT || !images[id].tex) return;
     const C2D_Image& img = images[id];
-    float w = kSpriteRefs[id][2] * sx, h = kSpriteRefs[id][3] * sy;
+    QuadParams q = spriteQuad(kSpriteRefs[id][2], kSpriteRefs[id][3], x, y, rot, sx, sy);
     C2D_DrawParams p;
-    p.pos.x = x; p.pos.y = y; p.pos.w = w; p.pos.h = h;
-    p.center.x = w / 2; p.center.y = h / 2;
+    p.pos.x = q.x; p.pos.y = q.y; p.pos.w = q.w; p.pos.h = q.h;
+    p.center.x = q.cx; p.center.y = q.cy;
     p.depth = 0.5f;
-    p.angle = -rot * (float)M_PI / 180.f;
+    p.angle = q.angle;
     if (color == 0xffffffff && blend == 0) {
         C2D_DrawImage(img, &p, nullptr);
     } else {
@@ -46,7 +47,10 @@ void sprite(int id, float x, float y, float rot, float sx, float sy, uint32_t co
     }
 }
 
-void rect(float x, float y, float w, float h, uint32_t c) { C2D_DrawRectSolid(x, y, 0.5f, w, h, col(c)); }
+void rect(float x, float y, float w, float h, uint32_t c) {
+    snapRect(x, y, w, h);
+    if (w > 0 && h > 0) C2D_DrawRectSolid(x, y, 0.5f, w, h, col(c));
+}
 
 void line(float x0, float y0, float x1, float y1, float width, uint32_t c) {
     u32 k = col(c);
@@ -122,6 +126,7 @@ std::string languageCode() {
 }
 
 uint64_t millis() { return osGetTime(); }
+uint64_t micros() { return svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000000ULL); }
 
 }  // namespace platform
 

@@ -42,6 +42,9 @@ AccessControlInfo:
   SpecialMemoryArrange: false
   MemoryMapping:
     - 1f000000-1f5fffff:r
+    # Writable shared DSP buffers used by libctru NDSP.
+    - 1ff50000-1ff57fff
+    - 1ff70000-1ff77fff
   SystemCallAccess:
     ControlMemory: 1
     QueryMemory: 2

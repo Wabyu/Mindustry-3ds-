@@ -23,6 +23,12 @@ def inspect(data):
  length=struct.unpack_from('>Q',data,chunk+8)[0]
  require(length==content,'Unexpected TMD content length')
  require(hashlib.sha256(data[content_off:content_off+length]).digest()==data[chunk+16:chunk+48],'TMD content hash mismatch')
+ # NDSP alternates between two 32 KiB blocks. Check the actual packed
+ # kernel descriptors, including write permission and exclusive end page.
+ caps=struct.unpack_from('<28I',ex,0x370)
+ for start,end in ((0x1ff50000,0x1ff58000),(0x1ff70000,0x1ff78000)):
+  pair=(0xff800000 | (start >> 12), 0xff900000 | (end >> 12))
+  require(pair in zip(caps,caps[1:]),f'Missing writable DSP window at {start:#x}')
  priority=ex[0x20f]
  require(0x18<=priority<=0x3f,f'Invalid application thread priority: {priority}; expected 24..63')
  require(priority>=ex[0x60f],'Thread priority exceeds the access descriptor privilege')

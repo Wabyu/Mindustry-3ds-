@@ -1,5 +1,7 @@
 # Mindustry 3DS
 
+Français | [English](README.en.md)
+
 Portage natif de **Mindustry v146** (Anuke, GPLv3) pour **Nintendo 3DS**, conçu pour la **Old 3DS XL** (ARM11 268 MHz, mode application 64 Mo), compatible New 3DS.
 
 Ce dépôt prend la suite de Forge3DS 1.4.6. Forge3DS était une réimplémentation « inspirée de » Mindustry, avec des valeurs recopiées à la main et un rendu logiciel. Mindustry 3DS est construit **à partir du projet open source original** : le dépôt [Anuken/Mindustry](https://github.com/Anuken/Mindustry) est inclus comme sous-module, épinglé sur le tag `v146`, et tout le contenu du jeu en est extrait au moment de la compilation.

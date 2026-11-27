@@ -56,6 +56,11 @@ BUILDABLE = {
     "rotaryPump": "Pump", "impulsePump": "Pump",
     # 0.4 lot 2a: industry / power that fits the single-liquid module
     "laserDrill": "Drill", "blastDrill": "Drill", "batteryLarge": "Battery", "diode": "Diode",
+    # 0.4 lot 2b: liquid industry and advanced power
+    "cultivator": "Crafter", "sporePress": "Crafter", "plastaniumCompressor": "Crafter",
+    "cryofluidMixer": "Crafter", "melter": "Crafter", "separator": "Separator",
+    "phaseWeaver": "Crafter", "surgeSmelter": "Crafter", "coalCentrifuge": "Crafter",
+    "differentialGenerator": "ConsumeGen", "thoriumReactor": "Reactor",
     "steamGenerator": "ConsumeGen",
     "duo": "ItemTurret", "scatter": "ItemTurret", "hail": "ItemTurret",
     "copperWall": "Wall", "copperWallLarge": "Wall",
@@ -72,7 +77,7 @@ VARIANT = {
     "phaseConveyor": 4,     # plain ItemBridge (transportTime), not BufferedItemBridge
 }
 # Liquids.java fields ported so far (extensible: add oil, cryofluid, slag...)
-LIQUIDS = ["water"]
+LIQUIDS = ["water", "oil", "cryofluid", "slag"]
 ENV_FLOOR = {"Floor", "ShallowLiquid", "EmptyFloor", "SteamVent", "AirBlock"}
 ENV_OVERLAY = {"OreBlock", "OverlayFloor", "SpawnBlock"}
 ENV_WALL = {"StaticWall", "StaticTree", "TreeBlock", "TallBlock", "StaticClusterWall"}
@@ -355,9 +360,19 @@ def collect_blocks(up, used_env_names):
             m = re.match(r"consumeLiquid\(Liquids\.(\w+),\s*([^)]*)\)\.boost\(\)", st)
             if m:
                 b["boost"] = (m.group(1), jc.evaluate(m.group(2), {}))
-            m = re.match(r"consumeLiquid\(Liquids\.(\w+),\s*([^)]*)\)$", st)
-            if m:  # ConsumeLiquid: amount per tick
-                b["liquid_use"] = (m.group(1), jc.evaluate(m.group(2), {}))
+            m = re.match(r"consumeLiquid\(Liquids\.(\w+),\s*([^)]*)\)(\.update\(false\))?$", st)
+            if m:  # ConsumeLiquid: amount per tick (update(false): the block removes it itself)
+                env = dict(vals); env.update(up.consts)
+                b["liquid_use"] = (m.group(1), jc.evaluate(m.group(2), env))
+            m = re.match(r"outputLiquid\s*=\s*new LiquidStack\(Liquids\.(\w+),\s*(.+)\)$", st)
+            if m:  # GenericCrafter.outputLiquid: amount per tick of efficient time
+                b["output_liquid"] = (m.group(1), jc.evaluate(m.group(2), {}))
+            m = re.match(r"results\s*=\s*(with\(.*\))$", st, re.S)
+            if m:  # Separator.results: weighted item table
+                b["results"] = parse_with(up, m.group(1), {}, items)
+            m = re.match(r"drawer\s*=\s*new DrawMulti\((.*)\)$", st, re.S)
+            if m:
+                b["drawers"] = jc.split_top(m.group(1), ",")
             if st.startswith("consume(new ConsumeItemFlammable"):
                 b["flammable"] = True
             m = re.match(r"outputItem\s*=\s*new ItemStack\(Items\.(\w+),\s*(\d+)\)", st)
@@ -625,6 +640,7 @@ def main():
     liquid_ids = {l["field"]: i for i, l in enumerate(liquids)}
     for b in blocks:
         b["liquid_ids"] = liquid_ids
+        b["item_ids"] = {it["name"]: i for i, it in enumerate(items)}
     units = collect_units(up)
     sectors = collect_sectors(up)
     item_ids = {it["name"]: i for i, it in enumerate(items)}
@@ -723,6 +739,11 @@ def assign_sprites(up, sp, blocks, items, units):
             b["spr_top"] = sp.add(n + "-end")
             b["spr_rot"] = sp.add(n + "-bridge")
             continue
+        if t == "Reactor":  # NuclearReactor: region, top (coolant), lights (heat)
+            b["spr"] = sp.add(n)
+            b["spr_top"] = sp.add(n + "-top", required=False)
+            b["spr_extra"] = sp.add(n + "-lights", required=False)
+            continue
         if t == "Diode":  # PowerDiode.draw: region + arrow
             b["spr"] = sp.add(n)
             b["spr_top"] = sp.add(n + "-arrow", required=False)
@@ -756,6 +777,8 @@ def assign_sprites(up, sp, blocks, items, units):
         if t == "Drill":
             b["spr_rot"] = sp.add(n + "-rotator")
             b["spr_top"] = sp.add(n + "-top")
+        elif t in ("Crafter", "ConsumeGen", "Separator", "Reactor") and b.get("drawers"):
+            b["layers"] = drawer_layers(up, sp, b)
         elif t == "Crafter" and b.get("draw_regions"):
             # DrawRegion layers: "-rotator" spins (spinSprite), the others are always drawn
             for suf in b["draw_regions"]:
@@ -808,6 +831,39 @@ def assign_sprites(up, sp, blocks, items, units):
 
 
 SHARDED = 0xffd37f  # Team.sharded.color
+
+# layer kinds understood by App::drawBlock
+LAYER_STATIC, LAYER_SPIN, LAYER_WARMUP, LAYER_LIQUID, LAYER_SPIN_REV, LAYER_LIQUID_TILE = 0, 1, 2, 3, 4, 5
+
+
+def drawer_layers(up, sp, b):
+    """DrawMulti(...) of the block, in drawing order, as (sprite, kind) layers."""
+    n = b["name"]
+    out = []
+    for dr in b.get("drawers", []):
+        m = re.match(r"new (\w+)\((.*?)\)(\{\{(.*)\}\})?$", dr.strip(), re.S)
+        if not m:
+            continue
+        cls, args, body = m.group(1), m.group(2), m.group(4) or ""
+        if cls == "DrawDefault":
+            out.append((sp.add(n), LAYER_STATIC))
+        elif cls == "DrawRegion":
+            suf = re.match(r'\s*"([^"]*)"', args)
+            suf = suf.group(1) if suf else ""
+            if not up.sprite(n + suf):
+                continue
+            spin = "rotateSpeed" in body or "spinSprite" in body
+            rev = re.search(r"rotateSpeed\s*=\s*-", body) is not None
+            out.append((sp.add(n + suf), (LAYER_SPIN_REV if rev else LAYER_SPIN) if spin else LAYER_STATIC))
+        elif cls in ("DrawWarmupRegion", "DrawFlame", "DrawGlowRegion", "DrawHeatRegion"):
+            if up.sprite(n + "-top"):
+                out.append((sp.add(n + "-top"), LAYER_WARMUP))
+        elif cls == "DrawLiquidRegion":
+            if up.sprite(n + "-liquid"):
+                out.append((sp.add(n + "-liquid"), LAYER_LIQUID))
+        elif cls == "DrawLiquidTile":
+            out.append((-1, LAYER_LIQUID_TILE))
+    return out
 
 
 def compose_icon(up, layers, size):
@@ -934,7 +990,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
                   "{%s}, %d, {%s}, %d, {%d, %d}, %s, %s, %s, "
                   "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %s, "
                   "%s, %s, %d, %s, %s, %s, %s, %s, %s, %d, "
-                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d, %s, %d, %s},") % (
+                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d, %s, %d, %s, %s},") % (
             b["name"], b["type"], cat_i, size, flag("solid"), flag("rotate"), buildable,
             cfloat(health), cfloat(build_cost), int(num("itemCapacity", 10)),
             req_s, len(reqs[:4]), cons_s, len(b["consumes"][:3]),
@@ -954,6 +1010,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
             b.get("spr_icon", -1), 1 if b.get("square", True) else 0,
             liquid_cols(b, num, flag), VARIANT.get(b["field"], 0),
             cfloat(num("liquidBoostIntensity", 1.6) if b.get("boost") else 0),
+            extra_cols(b, num),
         ))
         b["tier"] = int(num("tier"))
     c.append("};")
@@ -998,17 +1055,32 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
     open(os.path.join(gen, "content_gen.cpp"), "w").write("\n".join(c) + "\n")
 
 
+def extra_cols(b, num):
+    """outputLiquid, Separator results, NuclearReactor parameters, DrawMulti layers."""
+    ids = b.get("liquid_ids", {})
+    out = b.get("output_liquid")
+    res = b.get("results", [])[:4]
+    item_ids = b.get("item_ids", {})
+    res_s = ", ".join("{%d, %d}" % (item_ids[it], a) for it, a in res)
+    layers = b.get("layers", [])[:6]
+    lay_s = ", ".join("{%d, %d}" % (sid, kind) for sid, kind in layers)
+    return "%d, %s, {%s}, %d, %s, %s, %s, %s, {%s}, %d" % (
+        ids.get(out[0], -1) if out else -1, cfloat(out[1] if out else 0), res_s, len(res),
+        cfloat(num("heating", 0.01) if b["type"] == "Reactor" else 0), cfloat(num("coolantPower", 0.5) if b["type"] == "Reactor" else 0),
+        cfloat(num("explosionRadius", 0)), cfloat(num("explosionDamage", 0)), lay_s, len(layers))
+
+
 def liquid_cols(b, num, flag):
     """Liquid fields of BlockDef: capacity, pumpAmount, consumeLiquid, floor liquidDrop..."""
     ids = b.get("liquid_ids", {})
     t = b["type"]
-    has = t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") or "liquid_use" in b or bool(b.get("boost"))
+    has = t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") or "liquid_use" in b or bool(b.get("boost")) or "output_liquid" in b
     use = b.get("liquid_use") or b.get("boost")  # ConsumeLiquid, or the optional .boost() one
     drop = b.get("liquid_drop")
     # Block.liquidCapacity defaults to 10; LiquidRouter(20) / tank values come from the class/def
     cap = num("liquidCapacity", 10) if has else 0
     # LiquidBlock.outputsLiquid = true (Pump, Conduit, LiquidRouter)
-    outputs = 1 if t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") else 0
+    outputs = 1 if t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") or "output_liquid" in b else 0
     return "%s, %s, %d, %s, %d, %s, %d, %d, %d, %s" % (
         cfloat(cap), cfloat(num("pumpAmount", 0.2) if t == "Pump" else 0),
         ids.get(use[0], -1) if use else -1, cfloat(use[1] if use else 0),
@@ -1113,7 +1185,7 @@ def write_lang(up, romfs, blocks, items, units):
     keys += ["block.%s.description" % b["name"] for b in blocks if b.get("category")]
     keys += ["item.%s.name" % i["name"] for i in items]
     keys += ["unit.%s.name" % u["name"] for u in units]
-    keys += ["liquid.%s.name" % n for n in ("water",)]
+    keys += ["liquid.%s.name" % n for n in ("water", "oil", "cryofluid", "slag")]
     keys += ["sector.%s.name" % s for s in SECTORS]
     keys += ["sector.%s.description" % s for s in SECTORS]
     keys += ["wave", "wave.waiting", "wave.waveInProgress", "quit", "ok", "back", "loading",

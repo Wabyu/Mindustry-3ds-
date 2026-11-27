@@ -280,6 +280,41 @@ int main(int argc, char** argv) {
         app.configuring = -1;
         app.hideHud = true;
     }
+    // 0.4 lot 2: liquid industry and power
+    {
+        Game& g = app.game;
+        emptyMap(g, 40, 30, B_stone);
+        g.addBuilding(B_core_shard, 34, 24, TeamSharded, 0);
+        int bat = g.addBuilding(B_battery_large, 6, 14, TeamSharded, 0);
+        g.builds[bat].powerStored = 50000;
+        int node = g.addBuilding(B_power_node, 9, 12, TeamSharded, 0);
+        int cult = g.addBuilding(B_cultivator, 11, 15, TeamSharded, 0);
+        int press = g.addBuilding(B_spore_press, 14, 15, TeamSharded, 0);
+        int comp = g.addBuilding(B_plastanium_compressor, 17, 15, TeamSharded, 0);
+        int mix = g.addBuilding(B_cryofluid_mixer, 11, 11, TeamSharded, 0);
+        int sep = g.addBuilding(B_separator, 14, 11, TeamSharded, 0);
+        int reac = g.addBuilding(B_thorium_reactor, 18, 11, TeamSharded, 0);
+        int dif = g.addBuilding(B_differential_generator, 22, 15, TeamSharded, 0);
+        g.addBuilding(B_laser_drill, 22, 11, TeamSharded, 0);
+        for (int t : {cult, press, comp, mix, sep, reac, dif}) g.togglePowerLink(node, t);
+        g.builds[press].items.add(I_spore_pod, 10); g.builds[comp].items.add(I_titanium, 10);
+        g.builds[mix].items.add(I_titanium, 10); g.builds[reac].items.add(I_thorium, 20); g.builds[dif].items.add(I_pyratite, 5);
+        for (int t = 0; t < 600; t++) {
+            g.builds[cult].liquid = L_water; g.builds[cult].liquidAmount = 10;
+            g.builds[mix].liquid = L_water; g.builds[mix].liquidAmount = 10;
+            g.builds[sep].liquid = L_slag; g.builds[sep].liquidAmount = 10;
+            g.builds[comp].liquid = L_oil; g.builds[comp].liquidAmount = 10;
+            g.builds[dif].liquid = L_cryofluid; g.builds[dif].liquidAmount = 10;
+            g.builds[reac].liquid = L_cryofluid; g.builds[reac].liquidAmount = 30;
+            g.update(1.f);
+        }
+        app.hideHud = false;
+        app.camX = 16 * tilesize; app.camY = 13 * tilesize;
+        app.cursorDX = 0; app.cursorDY = 0; app.configuring = -1;
+        app.cursorTX = 18; app.cursorTY = 11;
+        record(app, "lot2_industry");
+        app.hideHud = true;
+    }
     // palette of every category (bottom screen)
     {
         Game& g = app.game;

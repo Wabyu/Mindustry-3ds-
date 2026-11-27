@@ -15,7 +15,7 @@ enum class BType : uint8_t {
     Solar,  // SolarGenerator
     Pump, Conduit, LiquidRouter,  // liquids
     Unloader, LiquidJunction, LiquidBridge,
-    Diode
+    Diode, Separator, Reactor
 };
 
 // mindustry.type.Category order
@@ -72,6 +72,11 @@ struct BlockDef {
     float liquidPressure;
     uint8_t variant;  // see below
     float boostIntensity;  // > 0: consumeLiquid is an optional .boost() (Drill.liquidBoostIntensity)
+    int16_t outputLiquid; float outputLiquidAmount;  // GenericCrafter.outputLiquid (per tick)
+    Stack results[4]; int nresults;                  // Separator.results (weights)
+    float heating, coolantPower;                     // NuclearReactor
+    float explosionRadius, explosionDamage;          // PowerGenerator explosion (tiles, damage)
+    struct Layer { int16_t spr; uint8_t kind; } layers[6]; int nlayers;  // DrawMulti order
     // variant: 1 armored (accept from belts/behind only), 2 no leak, 4 plain ItemBridge
 };
 

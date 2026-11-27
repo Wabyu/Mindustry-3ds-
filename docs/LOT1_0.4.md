@@ -44,3 +44,41 @@ Non porté dans ce lot : **tapis plastanium** (`StackConveyor`, transport par pi
 Tests PC (138 au total) : foreuse laser sans énergie (0), 150 objets en 120 s (1,26/s attendu), rapport du bonus d'eau 2,55 (1,6² = 2,56) ; diode : sens unique, énergie conservée, rechargement.
 Les tampons de `updatePower` sont réutilisés d'une image à l'autre (plus d'allocation par image).
 Coût hôte de la base de test (2 311 bâtiments) : 29 à 47 µs par tick selon les exécutions. Mesure PC bruitée, pas une mesure console.
+
+# 0.4 — lot 2b : industrie liquide, différentiel, réacteur
+
+Liquides ajoutés : pétrole, cryofluide, laitier. Le `LiquidModule` de v146 garde un montant par liquide. Ici, un emplacement supplémentaire stocke le liquide **produit** par une usine (`outputLiquid`), et le transport reste mono-liquide comme les conduites v146. Le mélangeur de cryofluide garde ainsi l'eau et le cryofluide en même temps.
+
+| Bloc | Classe v146 | Règles portées |
+|---|---|---|
+| Cultivateur | `AttributeCrafter` | eau 18/60, 80/60 énergie, 1 spore / 100 ticks (bonus d'attribut non porté) |
+| Presse à spores | `GenericCrafter` | 1 spore / 20 ticks, pétrole 18/60 par tick efficace, 0,7 énergie |
+| Compresseur de plastanium | `GenericCrafter` | pétrole 0,25 + 2 titane, 3 énergie, 60 ticks |
+| Mélangeur de cryofluide | `GenericCrafter` | eau 12/60 + 1 titane / 120 ticks, cryofluide 12/60, 1 énergie |
+| Fondeur | `GenericCrafter` | ferraille → laitier 12/60, 1 énergie |
+| Séparateur | `Separator` | laitier 4/60, 1,1 énergie, 35 ticks, tirage pondéré cuivre 5 / plomb 3 / graphite 2 / titane 2 |
+| Centrifugeuse à charbon, tisseur de phase, fonderie d'alliage | `GenericCrafter` | valeurs de `Blocks.java` |
+| Générateur différentiel | `ConsumeGenerator` | pyratite (`consumeItem`, multiplicateur 1) toutes les 220 ticks + cryofluide 0,1 ; 18/tick |
+| Réacteur au thorium | `NuclearReactor` | production = thorium / 30 × 15 ; chaleur += remplissage × 0,02 ; refroidissement min(cryofluide, chaleur / 0,5) ; alerte au-dessus de 0,46 (`flashThreshold`) ; explosion à 0,999 si thorium ≥ 5 ou chaleur ≥ 0,5 : 19 cases, 5 000 dégâts avec atténuation |
+
+- Rendu : les couches `DrawMulti` sont lues dans `Blocks.java`, dans leur ordre (régions fixes ou tournantes, `DrawWarmupRegion` / `DrawFlame`, `DrawLiquidRegion`, `DrawLiquidTile`). La vapeur et la fonderie de silicium passent par ce même chemin.
+- Réacteur : capot teinté par le refroidissant, voyants rouges selon la chaleur. Fiche : chaleur, production, liquide produit. Bandeau d'alerte clignotant en haut de l'écran.
+- Sauvegarde **format 3** : liquide produit et chaleur du réacteur. Les formats 1 (0.2) et 2 (0.3) restent lus (fixtures).
+- La pagination de la palette (commit `4f13c47`, intégré par cherry-pick) accueille les nouveaux blocs.
+
+Tests PC (153 au total, dont 15 pour ce lot), avec les valeurs mesurées :
+
+| Test | Résultat |
+|---|---|
+| Cultivateur | 9 spores en 1 000 ticks, 300 d'eau consommée |
+| Pétrole | conservé exactement (60,00 produit = 60,00 stocké) |
+| Compresseur de plastanium | 5 plastanium pour 10 titane |
+| Mélangeur de cryofluide | entrée et sortie simultanées, état « sortie pleine » |
+| Séparateur | 1 028 tirages : cuivre 0,45 (attendu 5/12) et titane 0,16 (attendu 2/12) |
+| Fondeur | produit du laitier |
+| Différentiel | efficacité 1, s'arrête sans cryofluide |
+| Réacteur refroidi | chaleur 0 |
+| Réacteur non refroidi | alerte, puis explosion qui détruit un mur à 4 cases ; le réacteur à 20 cases survit |
+| Format 3 | rechargement correct |
+
+Coût hôte de la base de test : 30 à 59 µs par tick selon l'exécution (machine partagée, mesure bruitée, pas une mesure console).

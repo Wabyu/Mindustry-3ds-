@@ -17,7 +17,7 @@ Ce dépôt prend la suite de Forge3DS 1.4.6. Forge3DS était une réimplémentat
 
 *Captures produites sur PC par `tests/screenshot.cpp`. Ce sont les vraies commandes de dessin du jeu, composées avec les sprites générés. Seule la police diffère de celle de la console.*
 
-**Nouveautés 0.4** : lot 2a (foreuses laser et à souffle, bonus d'eau, diode, grande batterie) ; lot 1 : déchargeur, tapis blindé, pont de phase, réglage tactile du trieur, jonction/routeur/ponts liquides, conduites pulsée et blindée, pompes rotative et à impulsion, autosauvegarde réglable et copie récupérable ([docs/LOT1_0.4.md](docs/LOT1_0.4.md), suite : [docs/REPRISE.md](docs/REPRISE.md)).
+**Nouveautés 0.4** : lot 2b (cultivateur, presse à spores, plastanium, cryofluide, fondeur, séparateur, phase, alliage, générateur différentiel, réacteur au thorium avec alerte de surchauffe) ; lot 2a (foreuses laser et à souffle, bonus d'eau, diode, grande batterie) ; lot 1 : déchargeur, tapis blindé, pont de phase, réglage tactile du trieur, jonction/routeur/ponts liquides, conduites pulsée et blindée, pompes rotative et à impulsion, autosauvegarde réglable et copie récupérable ([docs/LOT1_0.4.md](docs/LOT1_0.4.md), suite : [docs/REPRISE.md](docs/REPRISE.md)).
 
 **Nouveautés 0.3** : eau, pompe mécanique, conduites, réservoir et générateur à vapeur selon les règles v146 ; sauvegardes au format 2, avec lecture des sauvegardes 0.2 ([docs/LIQUIDES_0.3.md](docs/LIQUIDES_0.3.md)).
 
@@ -107,7 +107,7 @@ cia/                 RSF, bannière, son
 
 ## État de validation
 
-- 138 vérifications hôte passent (0.4 lots 1 et 2a inclus) (dont pompage, transfert, saturation, conservation, vapeur, lecture d'une sauvegarde 0.2) : débits, recettes, énergie (liens, plafond de 10, états, batteries), convoyeurs (4 directions, 28 cas de raccord, fusions, jonction, titane, embouteillage, rotation et amélioration sans perte), combat, construction, 5 cartes officielles et sauvegardes.
+- 153 vérifications hôte passent (0.4 lots 1, 2a et 2b inclus) (dont pompage, transfert, saturation, conservation, vapeur, lecture d'une sauvegarde 0.2) : débits, recettes, énergie (liens, plafond de 10, états, batteries), convoyeurs (4 directions, 28 cas de raccord, fusions, jonction, titane, embouteillage, rotation et amélioration sans perte), combat, construction, 5 cartes officielles et sauvegardes.
 - Scènes de contrôle visuel : 0 sprite à 0°/90° posé entre deux pixels, 0 texel lu hors de son sprite, panoramiques lents et diagonaux identiques au pixel près. Ce sont des compositions hôte des appels citro2d, pas des captures de la console.
 - Le `.3dsx` et le `.cia` compilent pour ARM11 (`-march=armv6k`). Le CIA passe une vérification statique : NCCH, exheader, mode 64 Mo, priorité et pile.
 - La version 0.1 démarre et tourne de façon fluide sur une Old 3DS XL réelle (retour qualitatif). **La 0.3 reste à essayer sur console**, avec relevé des FPS du menu pause.

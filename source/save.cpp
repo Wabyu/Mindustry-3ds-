@@ -9,7 +9,8 @@ namespace {
 constexpr uint32_t kMagic = 0x5333444d;  // "MD3S"
 // 1 = Mindustry 3DS 0.2 (raw block ids of that build, see kLegacyV1Blocks)
 // 2 = 0.3: block name table + liquids
-constexpr uint16_t kVersion = 2;
+// 3 = 0.4: crafter output liquid slot and reactor heat
+constexpr uint16_t kVersion = 3;
 
 struct Out {
     std::vector<uint8_t>& d;
@@ -73,6 +74,7 @@ std::vector<uint8_t> saveGame(const Game& g) {
         o.put((uint8_t)b.bufItem.size());
         for (int16_t it : b.bufItem) o.put(it);
         o.put(b.liquid); o.put(b.liquidAmount);
+        o.put(b.outLiquid); o.put(b.outAmount); o.put(b.heat);
     }
     uint16_t nu = 0;
     for (auto& u : g.units) if (u.alive && !u.isPlayer) nu++;
@@ -91,7 +93,7 @@ bool loadGame(Game& g, const std::vector<uint8_t>& data) {
     In in{data};
     if (in.get<uint32_t>() != kMagic) return false;
     uint16_t version = in.get<uint16_t>();
-    if (version != 1 && version != 2) return false;
+    if (version < 1 || version > 3) return false;
     int16_t sector = in.get<int16_t>();
     int16_t savedBlocks = in.get<int16_t>();
     if (in.get<int16_t>() != ITEM_COUNT || savedBlocks <= 0) return false;
@@ -178,6 +180,11 @@ bool loadGame(Game& g, const std::vector<uint8_t>& data) {
             if (liq >= 0 && liq < LIQUID_COUNT && amount > 0 && b.def().hasLiquids) {
                 b.liquid = liq; b.liquidAmount = std::min(amount, b.def().liquidCapacity);
             }
+        }
+        if (version >= 3) {
+            int16_t ol = in.get<int16_t>(); float oa = in.get<float>(); float heat = in.get<float>();
+            if (ol >= 0 && ol < LIQUID_COUNT && oa > 0 && b.def().outputLiquid == ol) { b.outLiquid = ol; b.outAmount = std::min(oa, b.def().liquidCapacity); }
+            b.heat = std::clamp(heat, 0.f, 1.f);
         }
         if (id >= 0) { if ((int)remap.size() <= id) remap.resize(id + 1, -1); remap[id] = idx; }
     }

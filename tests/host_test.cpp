@@ -710,6 +710,107 @@ static void testLot2a() {
           "diode and battery charge kept after reload");
 }
 
+// ---------------------------------------------------------------- 0.4 lot 2b: liquid industry, differential, reactor
+static int poweredBlock(Game& g, int16_t block, int x, int y) {
+    // the block plus a charged large battery touching its left side (3x3 at x - 2 - size/2)
+    int b = g.addBuilding(block, x, y, TeamSharded, 0);
+    int x0, y0, x1, y1; g.linkedTiles(block, x, y, x0, y0, x1, y1);
+    int bat = g.addBuilding(B_battery_large, x0 - 2, y0 + 1, TeamSharded, 0);
+    g.builds[bat].powerStored = 50000;
+    return b;
+}
+
+static void topUp(Building& b, int liquid, float amount) { b.liquid = (int16_t)liquid; b.liquidAmount = amount; }
+
+static void testLot2b() {
+    // cultivator: 18/60 water + 80/60 power -> 1 spore pod / 100 ticks
+    Game g; emptyMap(g, 60, 40); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 55, 35, TeamSharded, 0);
+    int cult = poweredBlock(g, B_cultivator, 10, 10);
+    for (int i = 0; i < 1000; i++) { topUp(g.builds[cult], L_water, 10); g.update(1.f); }
+    int pods = g.builds[cult].items.amount[I_spore_pod];
+    CHECK(pods >= 9 && pods <= 10, "cultivator: %d spore pods in 1000 ticks (craftTime 100)", pods);
+    CHECK(std::fabs(g.liquidConsumed - 18.0 / 60.0 * 1000) < 2, "cultivator used %.1f water (18/60 per tick)", g.liquidConsumed);
+    // spore press -> oil into a tank, conserved
+    int press = poweredBlock(g, B_spore_press, 10, 20);
+    int tank = g.addBuilding(B_liquid_tank, 13, 21, TeamSharded, 0);
+    g.builds[press].items.add(I_spore_pod, 10);
+    double produced0 = g.liquidProduced;
+    for (int i = 0; i < 600; i++) g.update(1.f);
+    double oil = g.builds[tank].liquidAmount + g.builds[press].outAmount;
+    CHECK(g.builds[tank].liquid == L_oil && g.builds[tank].liquidAmount > 50, "spore press filled the tank with %.1f oil", g.builds[tank].liquidAmount);
+    CHECK(std::fabs((g.liquidProduced - produced0) - oil) < 1e-3, "oil conserved: produced %.2f = stored %.2f", g.liquidProduced - produced0, oil);
+    // plastanium compressor: 0.25 oil + 2 titanium + 3 power -> 1 plastanium / 60 ticks
+    int comp = poweredBlock(g, B_plastanium_compressor, 30, 10);
+    g.builds[comp].items.add(I_titanium, 10);
+    for (int i = 0; i < 600; i++) { topUp(g.builds[comp], L_oil, 10); g.update(1.f); }
+    CHECK(g.builds[comp].items.amount[I_plastanium] == 5, "plastanium compressor: %d plastanium from 10 titanium",
+          (int)g.builds[comp].items.amount[I_plastanium]);
+    // cryofluid mixer: water in and cryofluid out at the same time
+    int mix = poweredBlock(g, B_cryofluid_mixer, 30, 20);
+    g.builds[mix].items.add(I_titanium, 10);
+    for (int i = 0; i < 200; i++) { topUp(g.builds[mix], L_water, 10); g.update(1.f); }
+    CHECK(g.builds[mix].outLiquid == L_cryofluid && g.builds[mix].outAmount > 9.9f && g.builds[mix].liquid == L_water,
+          "cryofluid mixer holds water (input) and %.1f cryofluid (output)", g.builds[mix].outAmount);
+    CHECK(g.status(g.builds[mix]).reason == Reason::LiquidFull, "mixer with no outlet: output full");
+    // melter -> separator: 5/3/2/2 weighted results
+    Game h; emptyMap(h, 60, 40); h.spawnPlayer = false;
+    h.addBuilding(B_core_shard, 55, 35, TeamSharded, 0);
+    int sep = poweredBlock(h, B_separator, 20, 20);
+    long counts[ITEM_COUNT] = {};
+    for (int i = 0; i < 60 * 600; i++) {
+        topUp(h.builds[sep], L_slag, 10);
+        h.update(1.f);
+        Building& sb = h.builds[sep];
+        for (int it = 0; it < ITEM_COUNT; it++) if (sb.items.amount[it] > 0) { counts[it] += sb.items.amount[it]; sb.items.remove(it, sb.items.amount[it]); }
+    }
+    long tot = counts[I_copper] + counts[I_lead] + counts[I_graphite] + counts[I_titanium];
+    CHECK(tot > 900 && std::fabs(counts[I_copper] / (double)tot - 5 / 12.0) < 0.04 && std::fabs(counts[I_titanium] / (double)tot - 2 / 12.0) < 0.04,
+          "separator: %ld results, copper %.2f / titanium %.2f (5/12, 2/12)", tot, counts[I_copper] / (double)tot, counts[I_titanium] / (double)tot);
+    int melt = poweredBlock(h, B_melter, 40, 20);
+    h.builds[melt].items.add(I_scrap, 5);
+    for (int i = 0; i < 120; i++) h.update(1.f);
+    CHECK(h.builds[melt].outLiquid == L_slag && h.builds[melt].outAmount > 9.9f && h.builds[melt].items.amount[I_scrap] < 5, "melter turns scrap into slag");
+    // differential generator: pyratite + 0.1 cryofluid -> 18 / tick; no coolant -> stop
+    Game d; emptyMap(d, 40, 30); d.spawnPlayer = false;
+    d.addBuilding(B_core_shard, 35, 25, TeamSharded, 0);
+    int dif = d.addBuilding(B_differential_generator, 10, 10, TeamSharded, 0);
+    d.builds[dif].items.add(I_pyratite, 10);
+    for (int i = 0; i < 60; i++) { topUp(d.builds[dif], L_cryofluid, 10); d.update(1.f); }
+    CHECK(std::fabs(d.builds[dif].productionEfficiency - 1.f) < 1e-3, "differential: efficiency %.2f (consumeItem, multiplier 1) = 1080/s",
+          d.builds[dif].productionEfficiency);
+    d.builds[dif].liquidAmount = 0;
+    for (int i = 0; i < 5; i++) d.update(1.f);
+    CHECK(d.status(d.builds[dif]).reason == Reason::MissingLiquid && d.builds[dif].productionEfficiency < 0.01f, "differential without cryofluid stops");
+    // thorium reactor: cooled stays cold; uncooled overheats, alerts, explodes and damages the area
+    Game r; emptyMap(r, 60, 40); r.spawnPlayer = false;
+    r.addBuilding(B_core_shard, 55, 35, TeamSharded, 0);
+    int cool = r.addBuilding(B_thorium_reactor, 10, 10, TeamSharded, 0);
+    int hot = r.addBuilding(B_thorium_reactor, 30, 10, TeamSharded, 0);
+    int wall = r.addBuilding(B_copper_wall, 34, 10, TeamSharded, 0);
+    r.builds[cool].items.add(I_thorium, 30); r.builds[hot].items.add(I_thorium, 30);
+    float maxHeatCool = 0; bool alerted = false;
+    for (int i = 0; i < 60 * 30 && r.builds[hot].alive; i++) {
+        topUp(r.builds[cool], L_cryofluid, 30);
+        r.update(1.f);
+        maxHeatCool = std::max(maxHeatCool, r.builds[cool].heat);
+        if (r.builds[hot].alive && r.status(r.builds[hot]).reason == Reason::Overheat) alerted = true;
+    }
+    CHECK(maxHeatCool < 0.05f && r.builds[cool].productionEfficiency > 0.9f, "cooled reactor: heat %.3f, 900/s", maxHeatCool);
+    CHECK(alerted && !r.builds[hot].alive && !r.builds[wall].alive, "uncooled reactor: overheat alert, explosion destroyed it and the wall 4 tiles away");
+    CHECK(r.builds[cool].alive, "the cooled reactor 20 tiles away survived the 19-tile blast");
+    // save format 3 keeps produced liquids and heat
+    Game s2; emptyMap(s2, 40, 30); s2.spawnPlayer = false;
+    s2.addBuilding(B_core_shard, 35, 25, TeamSharded, 0);
+    int m2 = s2.addBuilding(B_cryofluid_mixer, 10, 10, TeamSharded, 0);
+    s2.builds[m2].outLiquid = L_cryofluid; s2.builds[m2].outAmount = 7.5f;
+    int r2 = s2.addBuilding(B_thorium_reactor, 20, 10, TeamSharded, 0);
+    s2.builds[r2].heat = 0.25f;
+    auto bytes = saveGame(s2); Game t2;
+    CHECK(loadGame(t2, bytes) && std::fabs(t2.buildAt(10, 10)->outAmount - 7.5f) < 1e-4 && std::fabs(t2.buildAt(20, 10)->heat - 0.25f) < 1e-4,
+          "format 3: output liquid and reactor heat restored");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) romfs = argv[1];
     testDrillToCore();
@@ -732,6 +833,7 @@ int main(int argc, char** argv) {
     testLiquidsLot1();
     testSaveV2From03();
     testLot2a();
+    testLot2b();
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "OK", failures);
     return failures ? 1 : 0;
 }

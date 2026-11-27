@@ -160,7 +160,7 @@ static void updateBridge(Game& g, Building& b, float delta) {
 // can be unloaded to the emptiest one that accepts it (storage blocks are never loaded)
 static bool canUnloadFrom(const Building& o) {
     switch (o.def().type) {
-        case BType::Core: case BType::Storage: case BType::Crafter: case BType::Drill: case BType::ConsumeGen: return true;
+        case BType::Core: case BType::Storage: case BType::Crafter: case BType::Drill: case BType::ConsumeGen: case BType::Separator: return true;
         default: return false;  // conveyors, unloaders... set unloadable = false
     }
 }
@@ -274,18 +274,43 @@ static void updateDrill(Game& g, Building& b, float delta) {
     }
 }
 
+static float liquidEfficiency(const Building& b, const BlockDef& d, float delta) {
+    // ConsumeLiquid.efficiency: min(stored / (amount * delta), 1)
+    if (d.consumeLiquid < 0 || d.boostIntensity > 0) return 1.f;
+    float have = b.liquid == d.consumeLiquid ? b.liquidAmount : 0.f;
+    return std::fmin(have / (d.consumeLiquidAmount * delta), 1.f);
+}
+
+static void consumeLiquid(Game& g, Building& b, const BlockDef& d, float eff, float delta) {
+    if (d.consumeLiquid < 0 || d.boostIntensity > 0 || eff <= 0) return;
+    float used = std::fmin(b.liquidAmount, d.consumeLiquidAmount * eff * delta);
+    b.liquidAmount -= used;
+    g.liquidConsumed += used;
+}
+
 static void updateCrafter(Game& g, Building& b, float delta) {
     // GenericCrafter.GenericCrafterBuild.updateTile
     const BlockDef& d = b.def();
     bool shouldConsume = d.output.item < 0 || b.items.amount[d.output.item] + d.output.amount <= d.itemCapacity;
+    // outputLiquid: stops only when its slot is full (dumpExtraLiquid)
+    if (d.outputLiquid >= 0 && b.outLiquid == d.outputLiquid && b.outAmount >= d.liquidCapacity - 0.001f) shouldConsume = false;
     bool hasItems = true;
     for (int i = 0; i < d.nconsumes; i++) if (!b.items.has(d.consumes[i].item, d.consumes[i].amount)) hasItems = false;
     float eff = (shouldConsume && hasItems) ? 1.f : 0.f;
     if (d.powerUse > 0) eff = std::fmin(eff, b.powerStatus);
+    eff = std::fmin(eff, liquidEfficiency(b, d, delta));
     b.efficiency = eff;
     if (eff > 0) {
         b.progress += 1.f / d.craftTime * eff * delta;
         b.warmup = approach(b.warmup, 1.f, d.warmupSpeed * delta);
+        consumeLiquid(g, b, d, eff, delta);
+        if (d.outputLiquid >= 0) {
+            // handleLiquid(outputLiquid, min(amount * edelta, capacity - stored))
+            if (b.outLiquid != d.outputLiquid) { b.outLiquid = d.outputLiquid; b.outAmount = 0; }
+            float add = std::fmin(d.outputLiquidAmount * eff * delta, d.liquidCapacity - b.outAmount);
+            b.outAmount += add;
+            g.liquidProduced += add;
+        }
     } else {
         b.warmup = approach(b.warmup, 0.f, d.warmupSpeed * delta);
     }
@@ -298,16 +323,107 @@ static void updateCrafter(Game& g, Building& b, float delta) {
         g.addEffect(b.tx * tilesize + 4, b.ty * tilesize + 4, 0x7f7f7f, 6, 20, 0);
     }
     if (d.output.item >= 0 && timer(b.dumpTimer, dumpTime, delta)) g.dump(b, d.output.item);
+    if (d.outputLiquid >= 0) g.dumpLiquid(b, d.outputLiquid, 2.f, true);
+}
+
+// Separator.updateTile: weighted random result every craftTime of efficient time
+static void updateSeparator(Game& g, Building& b, float delta) {
+    const BlockDef& d = b.def();
+    float eff = d.powerUse > 0 ? b.powerStatus : 1.f;
+    eff = std::fmin(eff, liquidEfficiency(b, d, delta));
+    b.efficiency = eff;
+    b.totalProgress += b.warmup * delta;
+    if (eff > 0) {
+        b.progress += 1.f / d.craftTime * eff * delta;
+        b.warmup = lerp(b.warmup, 1.f, std::fmin(1.f, 0.02f * delta));
+        consumeLiquid(g, b, d, eff, delta);
+    } else {
+        b.warmup = lerp(b.warmup, 0.f, std::fmin(1.f, 0.02f * delta));
+    }
+    if (b.progress >= 1.f) {
+        b.progress = std::fmod(b.progress, 1.f);
+        int sum = 0;
+        for (int i = 0; i < d.nresults; i++) sum += d.results[i].amount;
+        int pick = sum > 0 ? (int)(randf() * sum) : 0, count = 0, item = -1;
+        for (int i = 0; i < d.nresults; i++) {
+            if (pick >= count && pick < count + d.results[i].amount) { item = d.results[i].item; break; }
+            count += d.results[i].amount;
+        }
+        if (item >= 0 && b.items.amount[item] < d.itemCapacity) g.offload(b, item);
+    }
+    if (timer(b.dumpTimer, dumpTime, delta)) g.dump(b, -1);
+}
+
+// NuclearReactor.updateTile
+static void updateReactor(Game& g, Building& b, float delta) {
+    const BlockDef& d = b.def();
+    int fuelItem = d.nconsumes > 0 ? d.consumes[0].item : (int)I_thorium;
+    int fuel = b.items.amount[fuelItem];
+    float fullness = (float)fuel / d.itemCapacity;
+    b.productionEfficiency = fullness;
+    if (fuel > 0) {
+        b.heat += fullness * d.heating * std::fmin(delta, 4.f);
+        b.generateTime += delta;  // timerFuel
+        if (b.generateTime >= d.itemDuration) { b.generateTime = 0; b.items.remove(fuelItem, 1); }
+    } else {
+        b.productionEfficiency = 0;
+    }
+    if (b.heat > 0 && b.liquid >= 0) {
+        // coolant: maxUsed = min(stored, heat / coolantPower)
+        float maxUsed = std::fmin(b.liquidAmount, b.heat / d.coolantPower);
+        b.heat -= maxUsed * d.coolantPower;
+        b.liquidAmount -= maxUsed;
+        g.liquidConsumed += maxUsed;
+    }
+    b.heat = std::clamp(b.heat, 0.f, 1.f);
+    if (b.heat >= 0.999f) {
+        g.message("reactor");  // Trigger.thoriumReactorOverheat
+        g.explode(b);
+    }
+}
+
+void Game::explode(Building& b) {
+    const BlockDef& d = b.def();
+    // NuclearReactor.shouldExplode: fuel >= 5 or heat >= 0.5; Damage.damage with linear falloff
+    bool boom = d.explosionDamage > 0 && (d.type != BType::Reactor ||
+                (d.nconsumes > 0 && b.items.amount[d.consumes[0].item] >= 5) || b.heat >= 0.5f);
+    float cx = b.tx * tilesize + (d.size % 2 == 0 ? tilesize / 2 : 0), cy = b.ty * tilesize + (d.size % 2 == 0 ? tilesize / 2 : 0);
+    int32_t self = b.id;
+    removeBuilding(self, true);
+    if (!boom) return;
+    float radius = d.explosionRadius * tilesize;
+    addEffect(cx, cy, 0xff795eu, radius, 60, 1);
+    int r = (int)d.explosionRadius + 1, tx = (int)(cx / tilesize), ty = (int)(cy / tilesize);
+    for (int y = ty - r; y <= ty + r; y++)
+        for (int x = tx - r; x <= tx + r; x++) {
+            int bi = buildIndexAt(x, y);
+            if (bi < 0) continue;
+            Building& o = builds[bi];
+            if (o.tx != x || o.ty != y) continue;  // once per building
+            float dx = x * tilesize - cx, dy = y * tilesize - cy, dist = std::sqrt(dx * dx + dy * dy);
+            if (dist > radius) continue;
+            damageBuilding(bi, d.explosionDamage * lerp(1.f - dist / radius, 1.f, 0.4f));
+        }
+    for (size_t i = 0; i < units.size(); i++) {
+        Unit& u = units[i];
+        if (!u.alive) continue;
+        float dx = u.x - cx, dy = u.y - cy, dist = std::sqrt(dx * dx + dy * dy);
+        if (dist <= radius) damageUnit((int32_t)i, d.explosionDamage * lerp(1.f - dist / radius, 1.f, 0.4f));
+    }
 }
 
 static void updateGenerator(Game& g, Building& b, float delta) {
     // ConsumeGenerator + ConsumeItemFlammable (+ ConsumeLiquid for the steam generator)
     const BlockDef& d = b.def();
     int fuel = -1; float best = -1;
-    for (int i = 0; i < ITEM_COUNT; i++)
-        if (b.items.has(i) && kItems[i].flammability >= 0.2f && kItems[i].flammability > best) { best = kItems[i].flammability; fuel = i; }
+    if (d.nconsumes > 0) {  // consumeItem(...): explicit fuel, efficiencyMultiplier 1 (differential generator)
+        if (b.items.has(d.consumes[0].item)) { fuel = d.consumes[0].item; best = 1.f; }
+    } else {
+        for (int i = 0; i < ITEM_COUNT; i++)
+            if (b.items.has(i) && kItems[i].flammability >= 0.2f && kItems[i].flammability > best) { best = kItems[i].flammability; fuel = i; }
+    }
     float eff = fuel >= 0 ? 1.f : 0.f;
-    float mult = fuel >= 0 ? kItems[fuel].flammability : 0.f;
+    float mult = fuel >= 0 ? (d.nconsumes > 0 ? 1.f : kItems[fuel].flammability) : 0.f;
     if (d.consumeLiquid >= 0) {
         // ConsumeLiquid.efficiency: min(stored / (amount * delta), 1), computed with efficiency = 1
         float have = b.liquid == d.consumeLiquid ? b.liquidAmount : 0.f;
@@ -439,8 +555,11 @@ float Game::moveLiquid(Building& b, Building* next, int liquid) {
 }
 
 // Building.dumpLiquid(liquid, scaling)
-void Game::dumpLiquid(Building& b, int liquid, float scaling) {
-    if (b.liquid != liquid || b.liquidAmount <= 0.0001f) return;
+void Game::dumpLiquid(Building& b, int liquid, float scaling, bool outputSlot) {
+    // outputSlot: the crafter's produced liquid (a building of v146 keeps one amount per liquid)
+    int16_t& curLiquid = outputSlot ? b.outLiquid : b.liquid;
+    float& amountRef = outputSlot ? b.outAmount : b.liquidAmount;
+    if (curLiquid != liquid || amountRef <= 0.0001f) return;
     int n = (int)b.proximity.size();
     int dmp = b.cdump;
     for (int i = 0; i < n; i++) {
@@ -451,15 +570,15 @@ void Game::dumpLiquid(Building& b, int liquid, float scaling) {
         if (!od.hasLiquids || other.team != b.team || other.def().type == BType::LiquidJunction) continue;
         float otherAmount = other.liquid == liquid ? other.liquidAmount : 0.f;
         float ofract = otherAmount / od.liquidCapacity;
-        float fract = b.liquidAmount / b.def().liquidCapacity;
+        float fract = amountRef / b.def().liquidCapacity;
         if (ofract < fract) {
             // transferLiquid
             float amount = (fract - ofract) * b.def().liquidCapacity / scaling;
             float flow = std::fmin(od.liquidCapacity - otherAmount, amount);
-            flow = std::fmin(flow, b.liquidAmount);
+            flow = std::fmin(flow, amountRef);
             if (flow > 0 && acceptLiquid(other, b, liquid)) {
                 handleLiquid(other, liquid, flow);
-                b.liquidAmount -= flow;
+                amountRef -= flow;
             }
         }
     }
@@ -580,6 +699,8 @@ void Game::updateBuilding(int32_t idx, float delta) {
         case BType::Bridge: updateBridge(*this, b, delta); break;
         case BType::Drill: updateDrill(*this, b, delta); break;
         case BType::Crafter: updateCrafter(*this, b, delta); break;
+        case BType::Separator: updateSeparator(*this, b, delta); break;
+        case BType::Reactor: updateReactor(*this, b, delta); break;
         case BType::ConsumeGen: updateGenerator(*this, b, delta); break;
         case BType::ItemTurret: updateTurret(*this, b, idx, delta); break;
         case BType::Pump: case BType::Conduit: case BType::LiquidRouter:
@@ -703,6 +824,7 @@ void Game::updatePower(float delta) {
             bool should = true;
             if (d.type == BType::Pump) should = b.liquidAmount < d.liquidCapacity - 0.01f;  // Pump.shouldConsume
             if (d.type == BType::Drill) should = b.dominantItems > 0 && b.items.total < d.itemCapacity;
+            if (d.type == BType::Separator) should = b.liquid == d.consumeLiquid && b.liquidAmount > 0.0001f;
             if (d.type == BType::Crafter) {
                 should = d.output.item < 0 || b.items.amount[d.output.item] + d.output.amount <= d.itemCapacity;
                 for (int i = 0; i < d.nconsumes; i++) if (!b.items.has(d.consumes[i].item, d.consumes[i].amount)) should = false;
@@ -866,9 +988,22 @@ StatusInfo Game::status(const Building& b) const {
     if (b.constructing) return {Status::Constructing, Reason::None, -1, b.buildProgress};
     const GraphStats* gs = (b.graph >= 0 && b.graph < (int)graphStats.size()) ? &graphStats[b.graph] : nullptr;
     switch (d.type) {
+        case BType::Reactor:
+            if (b.items.amount[d.nconsumes > 0 ? d.consumes[0].item : (int)I_thorium] == 0) return {Status::NoInput, Reason::NoFuel, -1, 0};
+            if (b.heat > 0.46f) return {Status::NoOutput, Reason::Overheat, -1, b.heat};  // flashThreshold
+            return {Status::Active, Reason::None, -1, b.heat};
+        case BType::Separator:
+            if (d.consumeLiquid >= 0 && (b.liquid != d.consumeLiquid || b.liquidAmount < d.consumeLiquidAmount))
+                return {Status::NoInput, Reason::MissingLiquid, d.consumeLiquid, 0};
+            if (d.powerUse > 0 && b.powerStatus <= 0.001f) return {Status::NoInput, (!gs || gs->members <= 1) ? Reason::Unpowered : Reason::NoPower, -1, 0};
+            return s;
         case BType::Crafter: {
             if (d.output.item >= 0 && b.items.amount[d.output.item] + d.output.amount > d.itemCapacity)
                 return {Status::NoOutput, Reason::OutputFull, d.output.item, 0};
+            if (d.outputLiquid >= 0 && b.outLiquid == d.outputLiquid && b.outAmount >= d.liquidCapacity - 0.001f)
+                return {Status::NoOutput, Reason::LiquidFull, d.outputLiquid, 0};
+            if (d.consumeLiquid >= 0 && d.boostIntensity <= 0 && (b.liquid != d.consumeLiquid || b.liquidAmount < d.consumeLiquidAmount))
+                return {Status::NoInput, Reason::MissingLiquid, d.consumeLiquid, b.liquid == d.consumeLiquid ? b.liquidAmount / d.consumeLiquidAmount : 0.f};
             for (int i = 0; i < d.nconsumes; i++)
                 if (!b.items.has(d.consumes[i].item, d.consumes[i].amount))
                     return {Status::NoInput, Reason::MissingItem, d.consumes[i].item, (float)d.consumes[i].amount};

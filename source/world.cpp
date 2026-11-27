@@ -280,7 +280,7 @@ static bool outputsItems(const BlockDef& d) {
     switch (d.type) {
         case BType::Conveyor: case BType::Junction: case BType::Router: case BType::Sorter:
         case BType::OverflowGate: case BType::Bridge: case BType::Drill: case BType::Crafter:
-        case BType::Core: case BType::Storage: case BType::ConsumeGen:
+        case BType::Core: case BType::Storage: case BType::ConsumeGen: case BType::Separator:
             return true;
         default: return false;
     }
@@ -555,9 +555,10 @@ bool Game::acceptItem(Building& b, Building& source, int item) {
             // end of a bridge chain: only accept from bridges linked into it
             return source.def().type == BType::Bridge && source.link == b.ty * width + b.tx;
         }
-        case BType::Crafter:
+        case BType::Crafter: case BType::Reactor:
             return consumesItem(d, item) && b.items.amount[item] < d.itemCapacity;
         case BType::ConsumeGen:
+            if (d.nconsumes > 0) return consumesItem(d, item) && b.items.amount[item] < d.itemCapacity;  // consumeItem fuel
             // ConsumeItemFlammable(minFlammability = 0.2)
             return kItems[item].flammability >= 0.2f && b.items.amount[item] < d.itemCapacity;
         case BType::ItemTurret: {

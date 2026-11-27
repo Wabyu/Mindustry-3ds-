@@ -28,10 +28,10 @@ Légende : **présent** · **partiel** · **absent** · **adaptation nécessaire
 |---|---|---|
 | Pompe mécanique, conduites, réservoir, eau | présent | 0.3, voir `LIQUIDES_0.3.md` |
 | Jonction, routeur et ponts liquides, conduites pulsée et blindée, pompes rotative et à impulsion | présent | 0.4 lot 1 |
-| Pétrole, cryofluide, laitier | absent | lot 2 |
+| Pétrole, cryofluide, laitier | présent | 0.4 lot 2b |
 | Presse à graphite, fonderie de silicium, four à verre | présent | |
 | Pulvérisateur, mélangeur de pyratite, mélangeur d'explosif | présent | ajoutés dans la 0.2 (objets et énergie uniquement) |
-| Cultivateur, presse à spores, plastanium, centrifugeuse, cryofluide, tissu phasé, alliage, fondeur, séparateur | absent | dépendent des liquides ou de blocs non portés |
+| Cultivateur, presse à spores, plastanium, centrifugeuse, cryofluide, tissu phasé, alliage, fondeur, séparateur | présent | 0.4 lot 2b |
 | Déchargeur, conteneurs liés au noyau | partiel | déchargeur à filtre tactile (0.4) ; conteneurs non liés au noyau |
 | Commandes optionnelles (ATELIERS) | adaptation nécessaire | propres à Forge3DS, absentes de Mindustry |
 

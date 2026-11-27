@@ -90,6 +90,9 @@ static const UiString kUi[] = {
     {"st.liquidfull", "Tank full", "Réservoir plein"},
     {"st.nofloor", "No liquid under the pump", "Aucun liquide sous la pompe"},
     {"pumping", "pumping", "pompage"},
+    {"st.overheat", "Overheating", "Surchauffe"},
+    {"heat", "heat", "chaleur"},
+    {"reactoralert", "Reactor overheating! Feed cryofluid", "Réacteur en surchauffe ! Ajouter du cryofluide"},
     {"maxlinks", "Too many links (max 10)", "Trop de liens (10 max.)"},
     {"st.active", "Active", "Actif"},
     {"st.nofuel", "No fuel", "Sans combustible"},
@@ -576,6 +579,50 @@ int App::envMargin() const {
 // Draws a block the way its upstream draw() layers it. `b` is null for ghosts (plans, cursor).
 void App::drawBlock(int block, float sx, float sy, int rot, const Building* b, uint32_t tint, float blend, int tx, int ty) {
     const BlockDef& d = kBlocks[block];
+    if (d.type == BType::Reactor) {
+        // NuclearReactor.draw: region, top tinted with the coolant (alpha = fill), lights (alpha = heat, red)
+        gfx::sprite(d.spr, sx, sy, 0, 1, 1, tint, blend);
+        if (b && b->liquid >= 0 && d.sprTop >= 0 && b->liquidAmount > 0.01f)
+            gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, withAlpha((kLiquids[b->liquid].color << 8) | 0xff, b->liquidAmount / d.liquidCapacity), 1.f);
+        if (b && d.sprExtra >= 0 && b->heat > 0.01f) {
+            float a = b->heat > 0.46f ? (0.6f + 0.4f * std::sin(game.tick * 0.3f)) * b->heat : b->heat;  // flashThreshold
+            gfx::sprite(d.sprExtra, sx, sy, 0, 1, 1, withAlpha(0xff1919ff, a), 1.f);
+        }
+        return;
+    }
+    if (d.nlayers > 0) {
+        // DrawMulti layers in upstream order
+        int tiles = 0;
+        for (int i = 0; i < d.nlayers; i++) {
+            const auto& L = d.layers[i];
+            float t = b ? b->totalProgress : 0;
+            switch (L.kind) {
+                case 0: gfx::sprite(L.spr, sx, sy, 0, 1, 1, tint, blend); break;
+                case 1: gfx::sprite(L.spr, sx, sy, t * 2.f, 1, 1, tint, blend); break;           // DrawRegion rotateSpeed 2
+                case 4: gfx::sprite(L.spr, sx, sy, 45.f - t * 2.f, 1, 1, tint, blend); break;    // rotateSpeed -2, rotation 45
+                case 2: if (b && b->warmup > 0.01f) gfx::sprite(L.spr, sx, sy, 0, 1, 1, withAlpha(0xffffffff, b->warmup)); break;
+                case 3: {  // DrawLiquidRegion: produced liquid if any, else the consumed one
+                    if (!b) break;
+                    int lq = b->outLiquid >= 0 ? b->outLiquid : b->liquid;
+                    float amt = b->outLiquid >= 0 ? b->outAmount : b->liquidAmount;
+                    if (lq >= 0 && amt > 0.001f) gfx::sprite(L.spr, sx, sy, 0, 1, 1, withAlpha((kLiquids[lq].color << 8) | 0xff, amt / d.liquidCapacity), 1.f);
+                    break;
+                }
+                case 5: {  // DrawLiquidTile: first = consumed liquid, second = produced liquid
+                    if (!b) { tiles++; break; }
+                    int lq = tiles == 0 ? b->liquid : b->outLiquid;
+                    float amt = tiles == 0 ? b->liquidAmount : b->outAmount;
+                    tiles++;
+                    if (lq >= 0 && amt > 0.001f) {
+                        float w = d.size * tilesize * kZoom - 4;
+                        gfx::rect(sx - w / 2, sy - w / 2, w, w, withAlpha((kLiquids[lq].color << 8) | 0xff, amt / d.liquidCapacity));
+                    }
+                    break;
+                }
+            }
+        }
+        return;
+    }
     switch (d.type) {
         case BType::Conveyor: {
             int frame = b ? conveyorFrame(*b) : 0;
@@ -711,11 +758,13 @@ void App::drawInspect(const Building& b) {
         case Reason::MissingLiquid: key = "st.noliquid"; break;
         case Reason::LiquidFull: key = "st.liquidfull"; break;
         case Reason::NoLiquidFloor: key = "st.nofloor"; break;
+        case Reason::Overheat: key = "st.overheat"; break;
         default: key = st.status == Status::Constructing ? "st.building" : "st.active"; break;
     }
     std::string label = lang.ui(key);
     if (st.reason == Reason::MissingItem && st.item >= 0) label += " : " + std::to_string((int)st.value) + " " + lang.itemName(st.item);
     if (st.reason == Reason::LowPower || st.status == Status::Constructing) label += " " + std::to_string((int)(st.value * 100)) + "%";
+    if (st.reason == Reason::Overheat) label += " " + std::to_string((int)(st.value * 100)) + "%";
     if (st.reason == Reason::MissingLiquid && st.item >= 0)
         label += " " + lang.get(std::string("liquid.") + kLiquids[st.item].name + ".name", kLiquids[st.item].name) + " (" + std::to_string((int)(st.value * 100)) + "%)";
     gfx::rect(42, 186, 8, 8, led);
@@ -755,8 +804,17 @@ void App::drawInspect(const Building& b) {
             std::snprintf(t, sizeof t, "  %s %.1f/s", lang.ui("pumping").c_str(), b.pumpTiles * d.pumpAmount * 60.f);
             line += t;
         }
-        if (d.type == BType::ConsumeGen) {
+        if (d.type == BType::ConsumeGen || d.type == BType::Reactor) {
             std::snprintf(t, sizeof t, "  +%.0f/s", d.powerProduction * b.productionEfficiency * 60.f);
+            line += t;
+        }
+        if (d.type == BType::Reactor) {
+            std::snprintf(t, sizeof t, "  %s %d%%", lang.ui("heat").c_str(), (int)(b.heat * 100));
+            line += t;
+        }
+        if (d.outputLiquid >= 0) {  // produced liquid slot
+            std::string on = lang.get(std::string("liquid.") + kLiquids[d.outputLiquid].name + ".name", kLiquids[d.outputLiquid].name);
+            std::snprintf(t, sizeof t, "  -> %s %.1f", on.c_str(), b.outLiquid >= 0 ? b.outAmount : 0.f);
             line += t;
         }
         detail = detail.empty() ? line : line + "   " + detail;
@@ -1115,6 +1173,12 @@ void App::drawHud() {
         gfx::text(200, 92, 0.8f, won ? kAccent : kRed, lang.ui(won ? "captured" : "lost").c_str(), 1);
         gfx::text(200, 126, 0.45f, 0xffffffff, lang.sectorName(g.sector).c_str(), 1);
     }
+    for (auto& rb : g.builds)
+        if (rb.alive && rb.team == TeamSharded && rb.def().type == BType::Reactor && rb.heat > 0.46f) {
+            gfx::rect(0, 32, 400, 16, ((int)(g.tick / 15) % 2) ? 0xe55454c0 : 0x80202080);
+            gfx::text(200, 33, 0.4f, 0xffffffff, lang.ui("reactoralert").c_str(), 1);
+            break;
+        }
     if (toastTime > 0 && !toast.empty()) {
         float a = std::fmin(1.f, toastTime / 30.f);
         int lines = 1 + (int)std::count(toast.begin(), toast.end(), '\n');

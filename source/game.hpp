@@ -68,7 +68,9 @@ struct Building {
     // Liquids (LiquidModule, single current liquid: enough while only water is ported)
     int16_t liquid = -1;
     float liquidAmount = 0, smoothLiquid = 0;
-    int16_t pumpDrop = -1; float pumpTiles = 0;  // Pump.onProximityUpdate: liquidDrop, amount
+    int16_t pumpDrop = -1; float pumpTiles = 0;
+    int16_t outLiquid = -1; float outAmount = 0;  // GenericCrafter.outputLiquid slot
+    float heat = 0;                               // NuclearReactor  // Pump.onProximityUpdate: liquidDrop, amount
     // Power
     int32_t graph = -1;
     std::vector<int32_t> links;  // power node lasers (building indices)
@@ -134,7 +136,7 @@ enum class Status : uint8_t { Active, NoOutput, NoInput, Constructing };
 enum class Reason : uint8_t {
     None, NoFuel, NoPower, LowPower, MissingItem, OutputFull, NoOre, NoAmmo,
     Charging, Discharging, BatteryFull, BatteryEmpty, Unpowered,
-    MissingLiquid, LiquidFull, NoLiquidFloor
+    MissingLiquid, LiquidFull, NoLiquidFloor, Overheat
 };
 struct StatusInfo { Status status; Reason reason; int16_t item; float value; };
 
@@ -261,13 +263,15 @@ public:
     void handleLiquid(Building& b, int liquid, float amount);
     float moveLiquid(Building& b, Building* next, int liquid);
     Building* liquidDestination(Building* via, const Building& source, int liquid);
-    void dumpLiquid(Building& b, int liquid, float scaling = 2.f);
+    void dumpLiquid(Building& b, int liquid, float scaling = 2.f, bool outputSlot = false);
+    void explode(Building& b);
     void moveLiquidForward(Building& b);
     bool pumpPlaceValid(int16_t block, int tx, int ty);
     void liquidTiling(Building& b);
     double liquidLeaked = 0;   // conduit ends (puddles are not ported: the leak is lost)
     double liquidConsumed = 0; // eaten by consumers
     double liquidPumped = 0;   // produced by pumps
+    double liquidProduced = 0; // produced by crafters (outputLiquid)
 
     // statistics (host tests / HUD)
     long itemsDelivered[ITEM_COUNT] = {};

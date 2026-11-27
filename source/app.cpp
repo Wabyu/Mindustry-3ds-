@@ -465,6 +465,17 @@ void App::configureTap(Building* target) {
 }
 
 // bottom screen layout
+struct PalettePage {
+    static constexpr int capacity = 14;
+    int page, pages;
+    PalettePage(int count, int selection)
+        : page(std::clamp(selection, 0, std::max(0, count - 1)) / capacity),
+          pages(std::max(1, (count + capacity - 1) / capacity)) {}
+    int first() const { return page * capacity; }
+    int turn(int delta) const { return ((page + pages + delta) % pages) * capacity; }
+    int margin() const { return pages > 1 ? 40 : 0; }
+};
+
 static const int kTabY = 56, kTabH = 26, kGridY = 84, kCellW = 45, kCellH = 40, kCols = 7, kInfoY = 166;
 
 void App::touchUi(int x, int y) {
@@ -474,8 +485,16 @@ void App::touchUi(int x, int y) {
     }
     auto cats = usedCategories();
     if (y >= kTabY && y < kTabY + kTabH && !cats.empty()) {
-        int w = 320 / (int)cats.size();
-        int i = std::min((int)cats.size() - 1, x / w);
+        PalettePage page(blocksIn(category).size(), selected[category]);
+        int margin = page.margin();
+        if (x < margin || x >= 320 - margin) {
+            selected[category] = page.turn(x < margin ? -1 : 1);
+            configuring = -1;
+            mode = Mode::Build;
+            return;
+        }
+        int w = (320 - 2 * margin) / (int)cats.size();
+        int i = std::min((int)cats.size() - 1, (x - margin) / w);
         category = cats[i];
         mode = Mode::Build;
         return;
@@ -493,7 +512,9 @@ void App::touchUi(int x, int y) {
     }
     if (y >= kGridY && y < kGridY + kCellH * 2) {
         auto list = blocksIn(category);
-        int i = ((y - kGridY) / kCellH) * kCols + x / kCellW;
+        if (x < 0 || x >= kCols * kCellW) return;
+        PalettePage page(list.size(), selected[category]);
+        int i = page.first() + ((y - kGridY) / kCellH) * kCols + x / kCellW;
         if (i < (int)list.size()) { selected[category] = i; mode = Mode::Build; }
         return;
     }
@@ -1151,9 +1172,19 @@ void App::drawBottom() {
     }
     // category tabs: icon of the first block, 16x16 composite (Block.icons())
     auto cats = usedCategories();
-    int tw = cats.empty() ? 320 : 320 / (int)cats.size();
+    auto list = blocksIn(category);
+    PalettePage page(list.size(), selected[category]);
+    int margin = page.margin();
+    int tw = (320 - 2 * margin) / std::max(1, (int)cats.size());
+    if (margin) {
+        gfx::rect(0, kTabY, margin - 1, kTabH, kPanel);
+        gfx::text(margin / 2, kTabY + 5, 0.50f, kAccent, "<", 1);
+        gfx::rect(321 - margin, kTabY, margin - 1, kTabH, kPanel);
+        std::snprintf(buf, sizeof buf, "%d/%d >", page.page + 1, page.pages);
+        gfx::text(320 - margin / 2, kTabY + 5, 0.40f, kAccent, buf, 1);
+    }
     for (size_t i = 0; i < cats.size(); i++) {
-        float x = i * tw;
+        float x = margin + i * tw;
         bool sel = cats[i] == category;
         gfx::rect(x + 1, kTabY, tw - 2, kTabH, sel ? kPanelLight : kPanel);
         if (sel) gfx::rect(x + 1, kTabY + kTabH - 2, tw - 2, 2, kAccent);
@@ -1161,7 +1192,6 @@ void App::drawBottom() {
         if (!list.empty() && kBlocks[list[0]].sprIcon >= 0)
             gfx::sprite(kBlocks[list[0]].sprIcon + 1, x + tw / 2.f, kTabY + (kTabH - 2) / 2.f);
     }
-    auto list = blocksIn(category);
     bool itemGrid = configuring >= 0 && g.builds[configuring].alive &&
                     (g.builds[configuring].def().type == BType::Sorter || g.builds[configuring].def().type == BType::Unloader);
     if (itemGrid) {
@@ -1176,8 +1206,10 @@ void App::drawBottom() {
     }
     // block grid: 32x32 composite icons at 1:1
     int selIndex = std::clamp(selected[category], 0, std::max(0, (int)list.size() - 1));
-    for (size_t i = 0; i < list.size() && i < 14 && !itemGrid; i++) {
-        float x = (i % kCols) * kCellW + 3, y = kGridY + (i / kCols) * kCellH;
+    for (int slot = 0; slot < PalettePage::capacity && !itemGrid; ++slot) {
+        int i = page.first() + slot;
+        if (i >= (int)list.size()) break;
+        float x = (slot % kCols) * kCellW + 3, y = kGridY + (slot / kCols) * kCellH;
         const BlockDef& d = kBlocks[list[i]];
         bool afford = c != nullptr;
         for (int r = 0; r < d.nreq && c; r++) if (c->items.amount[d.req[r].item] < d.req[r].amount) afford = false;

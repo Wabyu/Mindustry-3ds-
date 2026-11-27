@@ -249,8 +249,20 @@ static void updateDrill(Game& g, Building& b, float delta) {
     b.timeDrilled += b.warmup * delta;
     // Drill.getDrillTime(item)
     float delay = d.drillTime + d.hardnessMul * kItems[b.dominantItem].hardness;
+    // efficiency: powered drills follow their power satisfaction (consumePower)
+    b.efficiency = d.powerUse > 0 ? b.powerStatus : 1.f;
+    // optional water boost (ConsumeLiquid.boost): optionalEfficiency = min(stored / need, 1)
+    float optional = 0;
+    if (d.boostIntensity > 0 && b.liquid == d.consumeLiquid && d.consumeLiquidAmount > 0)
+        optional = std::fmin(b.liquidAmount / (d.consumeLiquidAmount * delta), 1.f);
     if (b.items.total < d.itemCapacity && b.dominantItems > 0 && b.efficiency > 0) {
-        float speed = b.efficiency;  // liquid boost not ported
+        // Drill.updateTile: speed = lerp(1, liquidBoostIntensity, optionalEfficiency) * efficiency
+        float speed = (d.boostIntensity > 0 ? lerp(1.f, d.boostIntensity, optional) : 1.f) * b.efficiency;
+        if (optional > 0) {
+            float used = std::fmin(b.liquidAmount, d.consumeLiquidAmount * optional * b.efficiency * delta);
+            b.liquidAmount -= used;
+            g.liquidConsumed += used;
+        }
         b.warmup = approach(b.warmup, speed, d.warmupSpeed * delta);
         b.progress += delta * b.dominantItems * speed * b.warmup;
     } else {
@@ -680,7 +692,9 @@ void Game::updatePower(float delta) {
     if (powerGraphsDirty) rebuildPowerGraphs();
     int n = (int)graphSatisfaction.size();
     if (!n) return;
-    std::vector<float> produced(n, 0), needed(n, 0), stored(n, 0), capacity(n, 0);
+    // reused buffers: no allocation per frame once the graph count is stable
+    static std::vector<float> produced, needed, stored, capacity, batteryDelta;
+    produced.assign(n, 0); needed.assign(n, 0); stored.assign(n, 0); capacity.assign(n, 0);
     for (auto& b : builds) {
         if (!b.alive || b.graph < 0 || b.constructing) continue;
         const BlockDef& d = b.def();
@@ -688,6 +702,7 @@ void Game::updatePower(float delta) {
         if (d.powerUse > 0) {
             bool should = true;
             if (d.type == BType::Pump) should = b.liquidAmount < d.liquidCapacity - 0.01f;  // Pump.shouldConsume
+            if (d.type == BType::Drill) should = b.dominantItems > 0 && b.items.total < d.itemCapacity;
             if (d.type == BType::Crafter) {
                 should = d.output.item < 0 || b.items.amount[d.output.item] + d.output.amount <= d.itemCapacity;
                 for (int i = 0; i < d.nconsumes; i++) if (!b.items.has(d.consumes[i].item, d.consumes[i].amount)) should = false;
@@ -697,7 +712,7 @@ void Game::updatePower(float delta) {
         if (d.powerBuffer > 0) { stored[b.graph] += b.powerStored; capacity[b.graph] += d.powerBuffer; }
     }
     // PowerGraph.update: batteries cover deficits and absorb surplus
-    std::vector<float> batteryDelta(n, 0);
+    batteryDelta.assign(n, 0);
     for (int g = 0; g < n; g++) {
         GraphStats& st = graphStats[g];
         st.produced = produced[g] / std::fmax(delta, 1e-6f); st.needed = needed[g] / std::fmax(delta, 1e-6f);
@@ -712,6 +727,30 @@ void Game::updatePower(float delta) {
         graphSatisfaction[g] = needed[g] <= 0 ? 1.f : std::fmin(1.f, produced[g] / needed[g]);
         st.batteryDelta = batteryDelta[g] / std::fmax(delta, 1e-6f);
         st.satisfaction = graphSatisfaction[g];
+    }
+    // PowerDiode.updateTile: half of the relative battery difference flows from back to front
+    for (auto& dio : builds) {
+        if (!dio.alive || dio.constructing || dio.def().type != BType::Diode) continue;
+        static const int ddx[4] = {1, 0, -1, 0}, ddy[4] = {0, 1, 0, -1};
+        Building* front = buildAt(dio.tx + ddx[dio.rotation], dio.ty + ddy[dio.rotation]);
+        Building* back = buildAt(dio.tx - ddx[dio.rotation], dio.ty - ddy[dio.rotation]);
+        if (!front || !back || front->graph < 0 || back->graph < 0 || front->graph == back->graph) continue;
+        if (front->team != dio.team || back->team != dio.team) continue;
+        int bg = back->graph, fg = front->graph;
+        if (capacity[bg] <= 0 || capacity[fg] <= 0) continue;
+        float backStored = stored[bg] / capacity[bg], frontStored = stored[fg] / capacity[fg];
+        if (backStored <= frontStored) continue;
+        float amount = stored[bg] * (backStored - frontStored) / 2;
+        amount = std::clamp(amount, 0.f, capacity[fg] * (1 - frontStored));
+        // transferPower: take from the back batteries in proportion to their charge, give to the front ones by free space
+        float takeFrac = stored[bg] > 0 ? amount / stored[bg] : 0, giveFree = capacity[fg] - stored[fg];
+        for (auto& o : builds) {
+            if (!o.alive || o.def().powerBuffer <= 0) continue;
+            if (o.graph == bg) o.powerStored -= o.powerStored * takeFrac;
+            else if (o.graph == fg && giveFree > 0) o.powerStored += amount * (o.def().powerBuffer - o.powerStored) / giveFree;
+        }
+        stored[bg] -= amount; stored[fg] += amount;
+        dio.progress = backStored - frontStored;  // shown by the arrow
     }
     for (auto& st : graphStats) st.members = 0;
     for (auto& b : builds) if (b.alive && b.graph >= 0) graphStats[b.graph].members++;
@@ -853,6 +892,7 @@ StatusInfo Game::status(const Building& b) const {
         }
         case BType::Drill:
             if (b.dominantItems == 0 || b.dominantItem < 0) return {Status::NoInput, Reason::NoOre, -1, 0};
+            if (d.powerUse > 0 && b.powerStatus <= 0.001f) return {Status::NoInput, (!gs || gs->members <= 1) ? Reason::Unpowered : Reason::NoPower, -1, 0};
             if (b.items.total >= d.itemCapacity) return {Status::NoOutput, Reason::OutputFull, b.dominantItem, 0};
             return {Status::Active, Reason::None, b.dominantItem, 0};
         case BType::Pump:

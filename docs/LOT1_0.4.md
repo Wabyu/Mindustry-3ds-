@@ -30,3 +30,17 @@ Tests PC : 130 vérifications.
 Coût hôte (`tests/bench.cpp`) : 2 311 bâtiments (1 710 tapis, 540 conduites) = 29 µs par tick sur PC. Ce n'est **pas** une mesure console : relever les chiffres du menu pause sur une base chargée.
 
 Non porté dans ce lot : **tapis plastanium** (`StackConveyor`, transport par piles de 10), reporté dans `docs/REPRISE.md`.
+
+# 0.4 — lot 2a : foreuses avancées, bonus d'eau, diode, grande batterie
+
+| Bloc | Classe v146 | Règles portées |
+|---|---|---|
+| Foreuse laser | `Drill` | 3×3, tier 4, `drillTime` 280, 1,1 énergie/tick, eau 0,08 en boost |
+| Foreuse à souffle | `Drill` | 4×4, tier 5, `drillTime` 280, `warmupSpeed` 0,01, 20 objets, 3 énergie/tick, eau 0,1, boost 1,8 |
+| Bonus d'eau (toutes les foreuses) | `ConsumeLiquid.boost()` | `speed = lerp(1, liquidBoostIntensity, optionalEfficiency) × efficiency`, appliqué au `warmup` et à la progression (×1,6² en régime établi) |
+| Grande batterie | `Battery` | 3×3, 50 000 |
+| Diode | `PowerDiode` | de l'arrière vers l'avant : la moitié de l'écart de charge relative des batteries, bornée à la place libre ; ne relie pas les réseaux |
+
+Tests PC (138 au total) : foreuse laser sans énergie (0), 150 objets en 120 s (1,26/s attendu), rapport du bonus d'eau 2,55 (1,6² = 2,56) ; diode : sens unique, énergie conservée, rechargement.
+Les tampons de `updatePower` sont réutilisés d'une image à l'autre (plus d'allocation par image).
+Coût hôte de la base de test (2 311 bâtiments) : 29 à 47 µs par tick selon les exécutions. Mesure PC bruitée, pas une mesure console.

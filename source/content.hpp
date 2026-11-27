@@ -14,7 +14,8 @@ enum class BType : uint8_t {
     ItemTurret, Wall, Core, Storage,
     Solar,  // SolarGenerator
     Pump, Conduit, LiquidRouter,  // liquids
-    Unloader, LiquidJunction, LiquidBridge
+    Unloader, LiquidJunction, LiquidBridge,
+    Diode
 };
 
 // mindustry.type.Category order
@@ -69,7 +70,9 @@ struct BlockDef {
     int16_t liquidDrop; float liquidMultiplier;        // Floor
     bool floating, outputsLiquid, hasLiquids;
     float liquidPressure;
-    uint8_t variant;  // 1 armored (accept from belts/behind only), 2 no leak, 4 plain ItemBridge
+    uint8_t variant;  // see below
+    float boostIntensity;  // > 0: consumeLiquid is an optional .boost() (Drill.liquidBoostIntensity)
+    // variant: 1 armored (accept from belts/behind only), 2 no leak, 4 plain ItemBridge
 };
 
 struct LiquidDef {

@@ -54,6 +54,8 @@ BUILDABLE = {
     "bridgeConduit": "LiquidBridge", "phaseConduit": "LiquidBridge",
     "pulseConduit": "Conduit", "platedConduit": "Conduit",
     "rotaryPump": "Pump", "impulsePump": "Pump",
+    # 0.4 lot 2a: industry / power that fits the single-liquid module
+    "laserDrill": "Drill", "blastDrill": "Drill", "batteryLarge": "Battery", "diode": "Diode",
     "steamGenerator": "ConsumeGen",
     "duo": "ItemTurret", "scatter": "ItemTurret", "hail": "ItemTurret",
     "copperWall": "Wall", "copperWallLarge": "Wall",
@@ -721,6 +723,10 @@ def assign_sprites(up, sp, blocks, items, units):
             b["spr_top"] = sp.add(n + "-end")
             b["spr_rot"] = sp.add(n + "-bridge")
             continue
+        if t == "Diode":  # PowerDiode.draw: region + arrow
+            b["spr"] = sp.add(n)
+            b["spr_top"] = sp.add(n + "-arrow", required=False)
+            continue
         if t == "Unloader":  # Unloader.draw: region + center tinted with the sort item colour
             b["spr"] = sp.add(n)
             b["spr_top"] = sp.add(n + "-center")
@@ -928,7 +934,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
                   "{%s}, %d, {%s}, %d, {%d, %d}, %s, %s, %s, "
                   "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %s, "
                   "%s, %s, %d, %s, %s, %s, %s, %s, %s, %d, "
-                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d, %s, %d},") % (
+                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d, %s, %d, %s},") % (
             b["name"], b["type"], cat_i, size, flag("solid"), flag("rotate"), buildable,
             cfloat(health), cfloat(build_cost), int(num("itemCapacity", 10)),
             req_s, len(reqs[:4]), cons_s, len(b["consumes"][:3]),
@@ -947,6 +953,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
             1 if v.get("targetGround", True) is not False else 0, ammo_s, len(b["ammo"][:3]),
             b.get("spr_icon", -1), 1 if b.get("square", True) else 0,
             liquid_cols(b, num, flag), VARIANT.get(b["field"], 0),
+            cfloat(num("liquidBoostIntensity", 1.6) if b.get("boost") else 0),
         ))
         b["tier"] = int(num("tier"))
     c.append("};")
@@ -995,8 +1002,8 @@ def liquid_cols(b, num, flag):
     """Liquid fields of BlockDef: capacity, pumpAmount, consumeLiquid, floor liquidDrop..."""
     ids = b.get("liquid_ids", {})
     t = b["type"]
-    has = t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") or "liquid_use" in b
-    use = b.get("liquid_use")
+    has = t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") or "liquid_use" in b or bool(b.get("boost"))
+    use = b.get("liquid_use") or b.get("boost")  # ConsumeLiquid, or the optional .boost() one
     drop = b.get("liquid_drop")
     # Block.liquidCapacity defaults to 10; LiquidRouter(20) / tank values come from the class/def
     cap = num("liquidCapacity", 10) if has else 0

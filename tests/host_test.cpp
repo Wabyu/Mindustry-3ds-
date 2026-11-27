@@ -662,6 +662,54 @@ static void testSaveV2From03() {
           g.buildAt(8, 8)->block == B_liquid_tank, "0.3 save: core items, tank and 70 water restored");
 }
 
+// ---------------------------------------------------------------- 0.4 lot 2a: drills, water boost, diode, large battery
+static long drillOutput(bool water, bool power, float seconds) {
+    Game g; emptyMap(g, 40, 20); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 35, 15, TeamSharded, 0);
+    for (int y = 4; y <= 6; y++) for (int x = 4; x <= 6; x++) g.tile(x, y)->ore = B_ore_titanium;
+    int drill = g.addBuilding(B_laser_drill, 5, 5, TeamSharded, 0);  // 3x3: 4..6
+    int box = g.addBuilding(B_vault, 5, 8, TeamSharded, 0);           // 3x3 above: collects the output
+    if (power)  // two combustion generators touching the drill: 2/tick for the 1.1/tick drill
+        for (int y = 4; y <= 5; y++) { int gen = g.addBuilding(B_combustion_generator, 3, y, TeamSharded, 0); g.builds[gen].items.add(I_coal, 10); }
+    for (int i = 0; i < (int)(seconds * 60); i++) {
+        if (water) { Building& d = g.builds[drill]; d.liquid = L_water; d.liquidAmount = 5; }  // a pump would keep it full
+        for (auto& o : g.builds) if (o.alive && o.block == B_combustion_generator && o.items.total < 5) o.items.add(I_coal, 5);
+        g.update(1.f);
+    }
+    return g.builds[box].items.amount[I_titanium];
+}
+
+static void testLot2a() {
+    long none = drillOutput(false, false, 60);
+    CHECK(none == 0, "unpowered laser drill produces nothing (%ld)", none);
+    long dry = drillOutput(false, true, 120), wet = drillOutput(true, true, 120);
+    // 60 / (280 + 50 * 3) * 9 tiles = 1.26 items/s; water boost x 1.6^2
+    CHECK(dry > 110 && dry < 155, "laser drill on 9 titanium: %ld items in 120 s (1.26/s at full warmup)", dry);
+    float ratio = (float)wet / (float)dry;
+    CHECK(ratio > 2.2f && ratio < 2.7f, "water boost ratio %.2f (liquidBoostIntensity 1.6, squared)", ratio);
+    // large battery capacity and diode
+    Game g; emptyMap(g, 40, 20); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 35, 15, TeamSharded, 0);
+    int big = g.addBuilding(B_battery_large, 5, 5, TeamSharded, 0);  // 4..6
+    int dio = g.addBuilding(B_diode, 7, 5, TeamSharded, 0);           // back = big (6,5), front = (8,5)
+    int small = g.addBuilding(B_battery, 8, 5, TeamSharded, 0);
+    g.builds[big].powerStored = 40000;
+    g.update(1.f);
+    CHECK(g.builds[big].graph != g.builds[small].graph && g.builds[dio].graph < 0, "diode separates two networks and joins none");
+    for (int i = 0; i < 60; i++) g.update(1.f);
+    float total = g.builds[big].powerStored + g.builds[small].powerStored;
+    CHECK(g.builds[small].powerStored > 3900.f && std::fabs(total - 40000.f) < 1.f,
+          "diode charged the front battery (%.0f / 4000), energy conserved (%.0f)", g.builds[small].powerStored, total);
+    g.builds[small].powerStored = 4000; g.builds[big].powerStored = 0;
+    for (int i = 0; i < 60; i++) g.update(1.f);
+    CHECK(g.builds[big].powerStored < 1.f, "diode is one-way (front -> back moves nothing)");
+    CHECK(std::fabs(kBlocks[B_battery_large].powerBuffer - 50000.f) < 1, "large battery buffer 50000");
+    // reload
+    auto bytes = saveGame(g); Game h;
+    CHECK(loadGame(h, bytes) && h.buildAt(7, 5)->block == B_diode && std::fabs(h.buildAt(8, 5)->powerStored - 4000.f) < 1,
+          "diode and battery charge kept after reload");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) romfs = argv[1];
     testDrillToCore();
@@ -683,6 +731,7 @@ int main(int argc, char** argv) {
     testTransportLot1();
     testLiquidsLot1();
     testSaveV2From03();
+    testLot2a();
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "OK", failures);
     return failures ? 1 : 0;
 }

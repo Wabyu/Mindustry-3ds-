@@ -636,6 +636,10 @@ void App::drawBlock(int block, float sx, float sy, int rot, const Building* b, u
                 if (d.sprRot >= 0) gfx::sprite(d.sprRot, sx, sy, b ? b->totalProgress * 2.f : 0, 1, 1, tint, blend);
                 if (d.sprExtra >= 0) gfx::sprite(d.sprExtra, sx, sy, 0, 1, 1, tint, blend);
             }
+            if (d.type == BType::Diode) {  // PowerDiode.draw: region, arrow along the rotation
+                if (d.sprTop >= 0) gfx::sprite(d.sprTop, sx, sy, rot * 90.f, 1, 1, tint, blend);
+                break;
+            }
             if (d.type == BType::Unloader) {  // Unloader.draw: center tinted with the sort item colour
                 if (b && b->sortItem >= 0) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, (kItems[b->sortItem].color << 8) | 0xff, 1.f);
                 break;

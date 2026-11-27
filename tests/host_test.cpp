@@ -547,6 +547,121 @@ static void testLegacySaveV1() {
     CHECK(loadGame(h, again) && h.core(TeamSharded)->items.amount[I_copper] == 321, "0.2 save re-saved as format 2 and reloaded");
 }
 
+// ---------------------------------------------------------------- 0.4 lot 1: transport and liquids
+static void testTransportLot1() {
+    // Unloader: filtered item from a container to a belt, 11 items/s (speed 60/11), conserved
+    Game g; emptyMap(g, 40, 20); g.spawnPlayer = false;
+    g.addBuilding(B_core_shard, 35, 15, TeamSharded, 0);
+    int cont = g.addBuilding(B_container, 5, 5, TeamSharded, 0);  // 2x2: 5..6 x 5..6
+    g.builds[cont].items.add(I_copper, 100); g.builds[cont].items.add(I_lead, 100);
+    int un = g.addBuilding(B_unloader, 7, 5, TeamSharded, 0);
+    for (int x = 8; x <= 20; x++) g.addBuilding(B_conveyor, x, 5, TeamSharded, 0);
+    g.addBuilding(B_container, 21, 5, TeamSharded, 0);
+    g.builds[un].sortItem = I_lead;
+    for (int i = 0; i < 600; i++) g.update(1.f);
+    CHECK(g.builds[cont].items.amount[I_copper] == 100 && g.builds[cont].items.amount[I_lead] < 100,
+          "unloader filter: only lead taken (%d lead left, copper untouched)", (int)g.builds[cont].items.amount[I_lead]);
+    int taken = 100 - g.builds[cont].items.amount[I_lead];
+    CHECK(taken >= 40 && taken <= 56, "unloader rate %d items in 10 s (60/11 ticks per item, belt-limited)", taken);
+    long onBelt = 0; for (auto& b : g.builds) if (b.alive && b.def().type == BType::Conveyor) onBelt += b.len;
+    int arrived = g.buildAt(21, 5)->items.amount[I_lead];
+    CHECK(onBelt + arrived == taken, "unloaded items conserved (%ld on belt + %d arrived)", onBelt, arrived);
+    // armored conveyor: no side input from non-conveyors, side input from conveyors allowed
+    Game a; emptyMap(a, 20, 20); a.spawnPlayer = false;
+    a.addBuilding(B_core_shard, 15, 15, TeamSharded, 0);
+    a.addBuilding(B_armored_conveyor, 10, 10, TeamSharded, 0);
+    a.addBuilding(B_conveyor, 10, 11, TeamSharded, 3);   // conveyor pointing into its side
+    int rt = a.addBuilding(B_router, 10, 9, TeamSharded, 0);
+    Building& arm = *a.buildAt(10, 10);
+    CHECK(!a.acceptItem(arm, a.builds[rt], I_copper) && a.acceptItem(arm, *a.buildAt(10, 11), I_copper),
+          "armored conveyor refuses a side router, accepts a side conveyor");
+    // phase conveyor: range 12, needs power
+    Game p; emptyMap(p, 40, 20); p.spawnPlayer = false;
+    p.addBuilding(B_core_shard, 35, 15, TeamSharded, 0);
+    int b1 = p.addBuilding(B_phase_conveyor, 5, 5, TeamSharded, 0);
+    int b2 = p.addBuilding(B_phase_conveyor, 17, 5, TeamSharded, 0);
+    CHECK(p.toggleBridgeLink(b1, b2), "phase conveyor links over 12 tiles");
+    p.builds[b1].items.add(I_copper, 10);
+    for (int i = 0; i < 120; i++) p.update(1.f);
+    CHECK(p.builds[b2].items.amount[I_copper] == 0, "unpowered phase conveyor moves nothing");
+    int sol = p.addBuilding(B_combustion_generator, 5, 4, TeamSharded, 0);
+    p.builds[sol].items.add(I_coal, 10);
+    int node = p.addBuilding(B_power_node, 8, 3, TeamSharded, 0);
+    p.togglePowerLink(node, b2); p.togglePowerLink(node, b1);
+    for (int i = 0; i < 300; i++) p.update(1.f);
+    CHECK(p.builds[b1].items.total + p.builds[b2].items.total == 10 && p.builds[b2].items.total > 0,
+          "powered phase conveyor moved %d of 10 items, none lost", p.builds[b2].items.total);
+}
+
+static void testLiquidsLot1() {
+    // crossing through a liquid junction: two flows do not mix and both arrive
+    Game g; liquidMap(g, 40, 30);
+    g.tile(2, 10)->floor = B_shallow_water; g.tile(10, 2)->floor = B_shallow_water;
+    g.addBuilding(B_mechanical_pump, 2, 10, TeamSharded, 0);
+    g.addBuilding(B_mechanical_pump, 10, 2, TeamSharded, 0);
+    for (int x = 3; x <= 9; x++) g.addBuilding(B_conduit, x, 10, TeamSharded, 0);
+    g.addBuilding(B_liquid_junction, 10, 10, TeamSharded, 0);
+    for (int x = 11; x <= 13; x++) g.addBuilding(B_conduit, x, 10, TeamSharded, 0);
+    int east = g.addBuilding(B_liquid_router, 14, 10, TeamSharded, 0);
+    for (int y = 3; y <= 9; y++) g.addBuilding(B_conduit, 10, y, TeamSharded, 1);
+    for (int y = 11; y <= 13; y++) g.addBuilding(B_conduit, 10, y, TeamSharded, 1);
+    int north = g.addBuilding(B_liquid_router, 10, 14, TeamSharded, 0);
+    g.addBuilding(B_plated_conduit, 15, 10, TeamSharded, 0);  // router dumps into it; plated end: no leak
+    for (int i = 0; i < 60 * 30; i++) g.update(1.f);
+    CHECK(g.builds[east].liquidAmount > 1 && g.builds[north].liquidAmount > 1 && g.buildAt(10, 10)->liquidAmount == 0,
+          "liquid junction crossing: east %.1f, north %.1f, junction holds nothing", g.builds[east].liquidAmount, g.builds[north].liquidAmount);
+    CHECK(std::fabs(g.liquidPumped - (liquidInWorld(g) + g.liquidLeaked)) < 1e-4 * g.liquidPumped && g.liquidLeaked == 0,
+          "junction network conserves %.1f water, plated end does not leak", g.liquidPumped);
+    // plated conduit refuses side input from a non-conduit, saturates without leaking
+    Building& pl = *g.buildAt(15, 10);
+    CHECK(pl.liquidAmount > 15.f, "plated conduit saturated (%.1f / 16)", pl.liquidAmount);
+    // bridge conduit over 4 tiles, with a dead end -> saturation, conservation
+    Game b; liquidMap(b, 40, 20);
+    b.tile(2, 8)->floor = B_shallow_water;
+    b.addBuilding(B_mechanical_pump, 2, 8, TeamSharded, 0);
+    int c1 = b.addBuilding(B_bridge_conduit, 3, 8, TeamSharded, 0);
+    int c2 = b.addBuilding(B_bridge_conduit, 7, 8, TeamSharded, 0);
+    CHECK(b.toggleBridgeLink(c1, c2) && !b.toggleBridgeLink(c1, b.addBuilding(B_bridge_conduit, 12, 8, TeamSharded, 0)) ,
+          "bridge conduit links at 4 tiles, not beyond");
+    int sink = b.addBuilding(B_liquid_tank, 9, 8, TeamSharded, 0);  // 8..10: next to the end bridge
+    for (int i = 0; i < 60 * 20; i++) b.update(1.f);
+    CHECK(b.builds[sink].liquidAmount > 50, "bridge conduit delivered %.1f water", b.builds[sink].liquidAmount);
+    CHECK(std::fabs(b.liquidPumped - liquidInWorld(b)) < 1e-4 * b.liquidPumped, "bridge chain conserves water");
+    // rotary pump: 2x2 on water, 0.2/tick/tile, needs power
+    Game r; liquidMap(r, 40, 20);
+    for (int y = 5; y <= 6; y++) for (int x = 5; x <= 6; x++) r.tile(x, y)->floor = B_shallow_water;
+    int rp = r.addBuilding(B_rotary_pump, 5, 5, TeamSharded, 0);
+    r.update(1.f);
+    CHECK(r.builds[rp].liquidAmount == 0, "unpowered rotary pump does not pump");
+    int gen = r.addBuilding(B_combustion_generator, 7, 5, TeamSharded, 0);
+    r.builds[gen].items.add(I_coal, 20);
+    for (int i = 0; i < 3; i++) r.update(1.f);
+    float before = r.builds[rp].liquidAmount;
+    r.update(1.f);
+    CHECK(std::fabs(r.builds[rp].liquidAmount - before - 4 * 0.2f) < 1e-3f, "powered rotary pump: 4 tiles x 0.2 = %.2f per tick",
+          r.builds[rp].liquidAmount - before);
+    // save / reload of the lot (names table): unloader filter, links, liquids
+    auto bytes = saveGame(g);
+    Game h;
+    CHECK(loadGame(h, bytes) && std::fabs(liquidInWorld(h) - liquidInWorld(g)) < 1e-3 && h.buildAt(10, 10)->block == B_liquid_junction,
+          "lot 1 network saved and reloaded");
+    auto bb = saveGame(b); Game hb;
+    CHECK(loadGame(hb, bb) && hb.buildAt(3, 8)->link == 8 * hb.width + 7, "bridge conduit link kept after reload");
+    for (int i = 0; i < 120; i++) hb.update(1.f);
+    CHECK(hb.buildAt(9, 8)->liquidAmount > b.builds[sink].liquidAmount, "reloaded bridge keeps flowing");
+}
+
+static void testSaveV2From03() {
+    std::ifstream f("tests/fixtures/save_v2_0.3.sav", std::ios::binary);
+    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    Game g;
+    bool ok = !d.empty() && loadGame(g, d);
+    CHECK(ok, "0.3 save (format 2, 84-block table) loads in this build (%d blocks)", (int)BLOCK_COUNT);
+    if (!ok) return;
+    CHECK(g.core(TeamSharded)->items.amount[I_copper] == 123 && std::fabs(liquidInWorld(g) - 70.0) < 1e-3 &&
+          g.buildAt(8, 8)->block == B_liquid_tank, "0.3 save: core items, tank and 70 water restored");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) romfs = argv[1];
     testDrillToCore();
@@ -565,6 +680,9 @@ int main(int argc, char** argv) {
     testPowerConfigAndStatus();
     testLiquids();
     testLegacySaveV1();
+    testTransportLot1();
+    testLiquidsLot1();
+    testSaveV2From03();
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "OK", failures);
     return failures ? 1 : 0;
 }

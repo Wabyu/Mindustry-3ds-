@@ -81,6 +81,9 @@ static const UiString kUi[] = {
              "Stick : voler  Croix : curseur  A : poser  B : démolir\nY : miner  X : tourner  L/R : bloc  SELECT : catégorie"},
     {"power", "Power", "Énergie"},
     {"drawcpu", "draw", "dessin"},
+    {"prevloaded", "Save unreadable: previous copy loaded (file kept aside)", "Sauvegarde illisible : copie précédente chargée (fichier conservé)"},
+    {"autosave", "X: autosave", "X : autosauvegarde"},
+    {"off", "off", "désactivée"},
     {"saveunreadable", "Save unreadable: kept on the SD. X = new game (old file kept aside)",
                        "Sauvegarde illisible : conservée sur la SD. X = nouvelle partie (ancien fichier mis de côté)"},
     {"st.noliquid", "Missing", "Manque"},
@@ -128,6 +131,8 @@ void App::init() {
     std::vector<uint8_t> setting;
     if (readFile(dataPath("volume.bin"), setting) && setting.size() == 1 && setting[0] <= 100)
         musicVolume = setting[0];
+    std::vector<uint8_t> as;
+    if (readFile(dataPath("autosave.bin"), as) && as.size() == 1 && as[0] <= 60) autosaveMinutes = as[0];
     lang.load(languageCode());
     loadCampaign();
 }
@@ -154,7 +159,15 @@ void App::saveCampaign() {
 void App::saveCurrent() {
     if (game.tiles.empty() || game.state != GameState::Playing) return;
     auto data = saveGame(game);
-    if (writeFileAtomic(dataPath(std::string("sector-") + kSectors[game.sector].name + ".sav"), data)) {
+    std::string path = dataPath(std::string("sector-") + kSectors[game.sector].name + ".sav");
+    // the previous save stays recoverable as .prev
+    std::vector<uint8_t> old;
+    if (readFile(path, old)) {
+        std::string prev = path + ".prev";
+        std::remove(prev.c_str());
+        std::rename(path.c_str(), prev.c_str());
+    }
+    if (writeFileAtomic(path, data)) {
         hasSave[game.sector] = true;
         toast = lang.ui("saved"); toastTime = 120;
     }
@@ -168,9 +181,17 @@ void App::startSector(int s, bool resume) {
     if (resume && hasFile) {
         ok = loadGame(game, existing);
         if (!ok) {
-            // never fall back to a fresh map here: the next autosave would overwrite the file
-            toast = lang.ui("saveunreadable"); toastTime = 300;
-            return;
+            // recoverable copy: load .prev, and set the unreadable file aside so nothing overwrites either
+            std::vector<uint8_t> prev;
+            if (readFile(savePath + ".prev", prev) && loadGame(game, prev)) {
+                std::rename(savePath.c_str(), (savePath + ".unreadable-" + std::to_string(millis())).c_str());
+                toast = lang.ui("prevloaded"); toastTime = 300;
+                ok = true; hasFile = false;
+            } else {
+                // never fall back to a fresh map here: the next autosave would overwrite the file
+                toast = lang.ui("saveunreadable"); toastTime = 300;
+                return;
+            }
         }
     }
     if (!ok) {
@@ -277,6 +298,11 @@ void App::updatePause(const Input& in) {
         writeFileAtomic(dataPath("volume.bin"), {static_cast<uint8_t>(musicVolume)});
         return;
     }
+    if (in.down & KX) {  // autosave interval: 2, 5, 10 minutes or off
+        autosaveMinutes = autosaveMinutes == 2 ? 5 : autosaveMinutes == 5 ? 10 : autosaveMinutes == 10 ? 0 : 2;
+        writeFileAtomic(dataPath("autosave.bin"), {autosaveMinutes});
+        return;
+    }
     if (in.down & KDown) pauseIndex = (pauseIndex + 1) % 3;
     if (in.down & KUp) pauseIndex = (pauseIndex + 2) % 3;
     int choice = -1;
@@ -309,7 +335,7 @@ void App::updateGame(const Input& in, float delta) {
         return;
     }
     autosaveTimer += delta;
-    if (autosaveTimer > 60 * 120) { autosaveTimer = 0; saveCurrent(); }
+    if (autosaveMinutes > 0 && autosaveTimer > 60.f * 60.f * autosaveMinutes) { autosaveTimer = 0; saveCurrent(); }
 
     // camera follows the player (or the core while respawning)
     float tx = camX, ty = camY;
@@ -343,7 +369,7 @@ void App::updateGame(const Input& in, float delta) {
     auto list = blocksIn(category);
     Building* conf = (configuring >= 0 && game.builds[configuring].alive) ? &game.builds[configuring] : nullptr;
     if (!conf) configuring = -1;
-    if (conf && conf->def().type == BType::Sorter) {
+    if (conf && (conf->def().type == BType::Sorter || conf->def().type == BType::Unloader)) {
         // Sorter config: L/R cycle the sorted item (none, then every item)
         if (in.down & KR) conf->sortItem = (int16_t)(conf->sortItem + 1 >= ITEM_COUNT ? -1 : conf->sortItem + 1);
         if (in.down & KL) conf->sortItem = (int16_t)(conf->sortItem <= -1 ? ITEM_COUNT - 1 : conf->sortItem - 1);
@@ -355,7 +381,8 @@ void App::updateGame(const Input& in, float delta) {
 
     Building* under = game.buildAt(cx, cy);
     bool configurable = under && under->team == TeamSharded && !under->constructing &&
-                        (under->def().type == BType::PowerNode || under->def().type == BType::Bridge || under->def().type == BType::Sorter);
+                        (under->def().type == BType::PowerNode || under->def().type == BType::Bridge || under->def().type == BType::Sorter ||
+                         under->def().type == BType::Unloader || under->def().type == BType::LiquidBridge);
     // A: configure / place (held: drag lines), B: cancel or remove, Y: mine
     if ((in.down & KA) && mode == Mode::Build && (conf || configurable)) {
         configureTap(under);
@@ -423,8 +450,8 @@ void App::configureTap(Building* target) {
             if (!game.togglePowerLink(conf->id, target->id)) { toast = lang.ui("maxlinks"); toastTime = 90; }
             return;
         }
-    } else if (conf->def().type == BType::Bridge) {
-        if (target != conf && target->def().type == BType::Bridge) {
+    } else if (conf->def().type == BType::Bridge || conf->def().type == BType::LiquidBridge) {
+        if (target != conf && target->block == conf->block) {
             if (!game.toggleBridgeLink(conf->id, target->id)) { toast = lang.ui("invalid"); toastTime = 60; }
             else configuring = -1;
             return;
@@ -432,7 +459,8 @@ void App::configureTap(Building* target) {
     }
     // tapping anything else selects it (if configurable) or closes the configuration
     bool configurable = target->team == TeamSharded && (target->def().type == BType::PowerNode ||
-                        target->def().type == BType::Bridge || target->def().type == BType::Sorter);
+                        target->def().type == BType::Bridge || target->def().type == BType::Sorter ||
+                        target->def().type == BType::Unloader || target->def().type == BType::LiquidBridge);
     configuring = (configurable && target != conf) ? target->id : -1;
 }
 
@@ -450,6 +478,17 @@ void App::touchUi(int x, int y) {
         int i = std::min((int)cats.size() - 1, x / w);
         category = cats[i];
         mode = Mode::Build;
+        return;
+    }
+    if (configuring >= 0 && game.builds[configuring].alive &&
+        (game.builds[configuring].def().type == BType::Sorter || game.builds[configuring].def().type == BType::Unloader) &&
+        y >= kGridY && y < kGridY + kCellH * 2) {
+        // Sorter / Unloader configuration: tap an item, tap it again to clear (ItemSelection)
+        int i = ((y - kGridY) / (kCellH)) * 8 + x / 40;
+        if (i >= 0 && i < ITEM_COUNT) {
+            Building& b = game.builds[configuring];
+            b.sortItem = (int16_t)(b.sortItem == i ? -1 : i);
+        }
         return;
     }
     if (y >= kGridY && y < kGridY + kCellH * 2) {
@@ -597,7 +636,11 @@ void App::drawBlock(int block, float sx, float sy, int rot, const Building* b, u
                 if (d.sprRot >= 0) gfx::sprite(d.sprRot, sx, sy, b ? b->totalProgress * 2.f : 0, 1, 1, tint, blend);
                 if (d.sprExtra >= 0) gfx::sprite(d.sprExtra, sx, sy, 0, 1, 1, tint, blend);
             }
-            if (d.sprTop >= 0 && d.type != BType::Bridge) {
+            if (d.type == BType::Unloader) {  // Unloader.draw: center tinted with the sort item colour
+                if (b && b->sortItem >= 0) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, (kItems[b->sortItem].color << 8) | 0xff, 1.f);
+                break;
+            }
+            if (d.sprTop >= 0 && d.type != BType::Bridge && d.type != BType::LiquidBridge) {
                 if (!b) {  // ghost: same layers as the icon (Battery: DrawRegion("-top"))
                     if (d.type == BType::Battery) gfx::sprite(d.sprTop, sx, sy, 0, 1, 1, tint, blend);
                 } else if (!b->constructing) {
@@ -656,8 +699,8 @@ void App::drawInspect(const Building& b) {
     std::string detail;
     const GraphStats* gs = (b.graph >= 0 && b.graph < (int)game.graphStats.size()) ? &game.graphStats[b.graph] : nullptr;
     if (configuring == b.id) {
-        detail = lang.ui(d.type == BType::PowerNode ? "cfg.node" : d.type == BType::Bridge ? "cfg.bridge" : "cfg.sorter");
-        if (d.type == BType::Sorter)
+        detail = lang.ui(d.type == BType::PowerNode ? "cfg.node" : (d.type == BType::Bridge || d.type == BType::LiquidBridge) ? "cfg.bridge" : "cfg.sorter");
+        if (d.type == BType::Sorter || d.type == BType::Unloader)
             detail = (b.sortItem >= 0 ? lang.itemName(b.sortItem) : lang.ui("none")) + "   " + detail;
     } else if (gs && (d.powerUse > 0 || d.powerProduction > 0 || d.powerBuffer > 0 || d.type == BType::PowerNode)) {
         detail = lang.ui("net") + "  +" + fmtRate(gs->produced) + "  -" + fmtRate(gs->needed) + "/s";
@@ -818,7 +861,7 @@ void App::drawWorld() {
         }
     // bridges
     for (auto& b : g.builds) {
-        if (!b.alive || b.def().type != BType::Bridge || b.link < 0) continue;
+        if (!b.alive || (b.def().type != BType::Bridge && b.def().type != BType::LiquidBridge) || b.link < 0) continue;
         float ax, ay, bx, by;
         worldToScreen(*this, b.tx * tilesize, b.ty * tilesize, ax, ay);
         worldToScreen(*this, (b.link % g.width) * tilesize, (b.link / g.width) * tilesize, bx, by);
@@ -944,7 +987,7 @@ void App::drawWorld() {
                     for (auto& o : g.builds)
                         if (o.alive && o.id != sel->id && g.powerLinkValid(*sel, o, false)) box(o, 0xffffff50);
                 for (int32_t l : sel->links) if (g.builds[l].alive) box(g.builds[l], kAccent);
-            } else if (d.type == BType::Bridge) {
+            } else if (d.type == BType::Bridge || d.type == BType::LiquidBridge) {
                 for (int dir = 0; dir < 4; dir++)
                     for (int k = 1; k <= (int)d.range; k++) {
                         static const int dx4[4] = {1, 0, -1, 0}, dy4[4] = {0, 1, 0, -1};
@@ -1070,6 +1113,9 @@ void App::drawBottom() {
             if (i == pauseIndex) gfx::rectLine(30, y, 260, 38, 2, kAccent);
             gfx::text(160, y + 10, 0.55f, 0xffffffff, lang.ui(items[i]).c_str(), 1);
         }
+        if (autosaveMinutes) std::snprintf(buf, sizeof buf, "%s %u min", lang.ui("autosave").c_str(), autosaveMinutes);
+        else std::snprintf(buf, sizeof buf, "%s %s", lang.ui("autosave").c_str(), lang.ui("off").c_str());
+        gfx::text(160, 60, 0.4f, kGray, buf, 1);
         std::snprintf(buf, sizeof buf, "L   -       BGM  %u%%       +   R", musicVolume);
         gfx::text(160, 209, 0.5f, kAccent, buf, 1);
         return;
@@ -1111,10 +1157,22 @@ void App::drawBottom() {
         if (!list.empty() && kBlocks[list[0]].sprIcon >= 0)
             gfx::sprite(kBlocks[list[0]].sprIcon + 1, x + tw / 2.f, kTabY + (kTabH - 2) / 2.f);
     }
-    // block grid: 32x32 composite icons at 1:1
     auto list = blocksIn(category);
+    bool itemGrid = configuring >= 0 && g.builds[configuring].alive &&
+                    (g.builds[configuring].def().type == BType::Sorter || g.builds[configuring].def().type == BType::Unloader);
+    if (itemGrid) {
+        // ItemSelection: 8 x 2 grid of item icons, the selected one framed in accent
+        int sel = g.builds[configuring].sortItem;
+        for (int i = 0; i < ITEM_COUNT; i++) {
+            float x = (i % 8) * 40 + 2, y = kGridY + (i / 8) * kCellH;
+            gfx::rect(x, y, 37, kCellH - 3, i == sel ? kPanelLight : kPanel);
+            if (i == sel) gfx::rectLine(x, y, 37, kCellH - 3, 2, kAccent);
+            gfx::sprite(kItems[i].spr, x + 18.5f, y + (kCellH - 3) / 2.f, 0, 1, 1);
+        }
+    }
+    // block grid: 32x32 composite icons at 1:1
     int selIndex = std::clamp(selected[category], 0, std::max(0, (int)list.size() - 1));
-    for (size_t i = 0; i < list.size() && i < 14; i++) {
+    for (size_t i = 0; i < list.size() && i < 14 && !itemGrid; i++) {
         float x = (i % kCols) * kCellW + 3, y = kGridY + (i / kCols) * kCellH;
         const BlockDef& d = kBlocks[list[i]];
         bool afford = c != nullptr;

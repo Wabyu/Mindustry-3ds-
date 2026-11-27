@@ -524,6 +524,7 @@ bool Game::acceptItem(Building& b, Building& source, int item) {
             int direction = std::abs(dirTo - b.rotation);
             bool srcRot = source.def().rotate;
             Building* nx = b.next >= 0 ? &builds[b.next] : nullptr;
+            if ((d.variant & 1) && source.def().type != BType::Conveyor && dirTo != b.rotation) return false;  // ArmoredConveyor
             return (((direction == 0) && b.minitem >= 0.4f) || ((direction % 2 == 1) && b.minitem > 0.7f)) &&
                    !(srcRot && nx == &source);
         }

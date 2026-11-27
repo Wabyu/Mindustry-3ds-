@@ -46,6 +46,7 @@ public:
     bool hasSave[SECTOR_COUNT] = {};
     float repeatTimer = 0;
     float autosaveTimer = 0;
+    uint8_t autosaveMinutes = 5;  // pause screen, X: 2 / 5 / 10 / off
     float fps = 0;
     bool exitRequested = false;
     bool hideHud = false;

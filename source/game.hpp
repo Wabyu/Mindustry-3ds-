@@ -260,6 +260,7 @@ public:
     bool acceptLiquid(const Building& b, const Building& source, int liquid) const;
     void handleLiquid(Building& b, int liquid, float amount);
     float moveLiquid(Building& b, Building* next, int liquid);
+    Building* liquidDestination(Building* via, const Building& source, int liquid);
     void dumpLiquid(Building& b, int liquid, float scaling = 2.f);
     void moveLiquidForward(Building& b);
     bool pumpPlaceValid(int16_t block, int tx, int ty);

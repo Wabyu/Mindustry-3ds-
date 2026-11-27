@@ -548,9 +548,9 @@ void Game::updateBuilder(Unit& u, float delta) {
         b.health = d.health;
         plans.erase(plans.begin() + pi);
         refreshAround(bi);
-        if (d.type == BType::Bridge) {
+        if (d.type == BType::Bridge || d.type == BType::LiquidBridge) {
             // ItemBridge.lastBuild: link the previous bridge to this one when aligned and in range
-            if (lastBridge >= 0 && lastBridge != bi && builds[lastBridge].alive && builds[lastBridge].def().type == BType::Bridge) {
+            if (lastBridge >= 0 && lastBridge != bi && builds[lastBridge].alive && builds[lastBridge].block == b.block) {
                 Building& lb = builds[lastBridge];
                 int dx = b.tx - lb.tx, dy = b.ty - lb.ty;
                 if ((dx == 0) != (dy == 0) && std::abs(dx + dy) <= (int)d.range && lb.link < 0)

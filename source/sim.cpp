@@ -105,7 +105,23 @@ static void updateBridge(Game& g, Building& b, float delta) {
     // BufferedItemBridge: items enter a buffer and travel `speed` ticks to the linked bridge
     const BlockDef& d = b.def();
     Building* other = b.link >= 0 ? g.buildAt(b.link % g.width, b.link / g.width) : nullptr;
-    if (other && (other->def().type != BType::Bridge || other->team != b.team)) { other = nullptr; b.link = -1; }
+    if (other && (other->block != b.block || other->team != b.team)) { other = nullptr; b.link = -1; }
+    if (other && (d.variant & 4)) {
+        // plain ItemBridge (phase conveyor): warmup -> efficiency over 30 ticks,
+        // one item every transportTime (2) ticks of efficient time
+        float eff = d.powerUse > 0 ? b.powerStatus : 1.f;
+        b.warmup = approach(b.warmup, eff, delta / 30.f);
+        b.time += eff * delta;
+        while (b.time >= 2.f) {
+            b.time -= 2.f;
+            int it = b.items.first();
+            if (it < 0) break;
+            if (g.acceptItem(*other, b, it)) { b.items.remove(it, 1); g.handleItem(*other, b, it); }
+            else break;
+        }
+        if (b.time > 2.f) b.time = 2.f;
+        return;
+    }
     if (!other) {
         // end of the chain: dump to neighbours that are not feeding bridges
         if (timer(b.dumpTimer, dumpTime, delta)) {
@@ -138,6 +154,68 @@ static void updateBridge(Game& g, Building& b, float delta) {
             b.bufTime.erase(b.bufTime.begin());
         }
     }
+}
+
+// Unloader.updateTile (v146): every speed ticks move one item from the fullest neighbour that
+// can be unloaded to the emptiest one that accepts it (storage blocks are never loaded)
+static bool canUnloadFrom(const Building& o) {
+    switch (o.def().type) {
+        case BType::Core: case BType::Storage: case BType::Crafter: case BType::Drill: case BType::ConsumeGen: return true;
+        default: return false;  // conveyors, unloaders... set unloadable = false
+    }
+}
+
+static void updateUnloader(Game& g, Building& b, float delta) {
+    const float speed = 60.f / 11.f;
+    b.time += delta;
+    if (b.time < speed || b.proximity.size() < 2) return;
+    int n = (int)b.proximity.size();
+    auto loadFactor = [&](Building& o, int item) {
+        int cap = o.def().type == BType::Core ? o.def().itemCapacity : o.def().itemCapacity;
+        return cap <= 0 ? 0.f : o.items.amount[item] / (float)cap;
+    };
+    auto possible = [&](int item, Building** from, Building** to) {
+        *from = *to = nullptr;
+        float fromF = -1, toF = 2;
+        for (int k = 0; k < n; k++) {
+            Building& o = g.builds[b.proximity[k]];
+            if (o.team != b.team || o.constructing) continue;
+            float f = loadFactor(o, item);
+            bool isStorage = o.def().type == BType::Storage || o.def().type == BType::Core;
+            if (canUnloadFrom(o) && o.items.has(item) && f > fromF) { fromF = f; *from = &o; }
+            if (!isStorage && g.acceptItem(o, b, item) && f < toF) { toF = f; *to = &o; }
+        }
+        return *from && *to && *from != *to;
+    };
+    Building *from = nullptr, *to = nullptr;
+    int item = -1;
+    if (b.sortItem >= 0) { if (possible(b.sortItem, &from, &to)) item = b.sortItem; }
+    else
+        for (int i = 0; i < ITEM_COUNT; i++) {
+            int cand = (b.lastItem + 1 + i + ITEM_COUNT) % ITEM_COUNT;  // rotations
+            if (possible(cand, &from, &to)) { item = cand; break; }
+        }
+    if (item >= 0) {
+        b.lastItem = (int16_t)item;
+        from->items.remove(item, 1);
+        g.handleItem(*to, b, item);
+        b.time = std::fmod(b.time, speed);
+    } else {
+        b.time = std::fmin(b.time, speed);
+    }
+}
+
+// LiquidBridge.updateTransport / doDump
+static void updateLiquidBridge(Game& g, Building& b, float delta) {
+    const BlockDef& d = b.def();
+    Building* other = b.link >= 0 ? g.buildAt(b.link % g.width, b.link / g.width) : nullptr;
+    if (other && (other->block != b.block || other->team != b.team)) { other = nullptr; b.link = -1; }
+    float eff = d.powerUse > 0 ? b.powerStatus : 1.f;
+    b.warmup = approach(b.warmup, eff, delta / 30.f);
+    b.smoothLiquid = lerp(b.smoothLiquid, d.liquidCapacity > 0 ? b.liquidAmount / d.liquidCapacity : 0.f, std::fmin(1.f, 0.05f * delta));
+    if (b.liquid < 0 || b.liquidAmount <= 0.0001f) return;
+    if (other) { if (b.warmup >= 0.25f) g.moveLiquid(b, other, b.liquid); }
+    else g.dumpLiquid(b, b.liquid, 1.f);
 }
 
 static void countOre(Game& g, Building& b) {
@@ -247,14 +325,58 @@ static void updateGenerator(Game& g, Building& b, float delta) {
 static const int ld4x[4] = {1, 0, -1, 0};
 static const int ld4y[4] = {0, 1, 0, -1};
 
+// Tile.absoluteRelativeTo(cx, cy): direction from `from` toward a tile, also at a distance
+static int absoluteRelativeTo(const Building& from, int cx, int cy) {
+    int x = from.tx, y = from.ty;
+    if (from.def().size % 2 == 1) {
+        if (std::abs(x - cx) > std::abs(y - cy)) {
+            if (x <= cx - 1) return 0;
+            if (x >= cx + 1) return 2;
+        } else {
+            if (y <= cy - 1) return 1;
+            if (y >= cy + 1) return 3;
+        }
+        return -1;
+    }
+    // even sizes: compare in world units with the block offset (+half tile)
+    float fx = x * 2 + 1, fy = y * 2 + 1, tx = cx * 2.f, ty = cy * 2.f;
+    if (std::fabs(fx - tx) > std::fabs(fy - ty)) {
+        if (fx <= tx - 1) return 0;
+        if (fx >= tx + 1) return 2;
+    } else {
+        if (fy <= ty - 1) return 1;
+        if (fy >= ty + 1) return 3;
+    }
+    return -1;
+}
+
 bool Game::acceptLiquid(const Building& b, const Building& source, int liquid) const {
     const BlockDef& d = b.def();
     if (b.constructing || !d.hasLiquids || b.team != source.team) return false;
     bool sameOrEmpty = b.liquid == liquid || b.liquidAmount < 0.2f;  // liquids.current() == liquid || currentAmount() < 0.2
     switch (d.type) {
-        case BType::Conduit:
+        case BType::Conduit: {
             // ...and not from the tile it flows into
-            return sameOrEmpty && (&source == &b || (relativeTo(source, b) + 2) % 4 != b.rotation);
+            // Conduit: (source.relativeTo(tile.x, tile.y) + 2) % 4 != rotation (Tile.absoluteRelativeTo)
+            bool ok = sameOrEmpty && (&source == &b || (absoluteRelativeTo(source, b.tx, b.ty) + 2) % 4 != b.rotation);
+            if (ok && (d.variant & 1)) {
+                // ArmoredConduit: conduits, junctions, from behind, or a source that is not adjacent
+                BType st = source.def().type;
+                bool adjacent = std::find(source.proximity.begin(), source.proximity.end(), b.id) != source.proximity.end();
+                ok = st == BType::Conduit || st == BType::LiquidJunction || absoluteRelativeTo(source, b.tx, b.ty) == b.rotation || !adjacent;
+            }
+            return ok;
+        }
+        case BType::LiquidJunction:
+            return false;
+        case BType::LiquidBridge: {
+            if (!sameOrEmpty) return false;
+            if (b.link >= 0) {  // ItemBridge.checkAccept: anything but the linked side
+                const Building* o = const_cast<Game*>(this)->buildAt(b.link % width, b.link / width);
+                if (o) return relativeTo(b, *o) != relativeTo(b, source);
+            }
+            return source.block == b.block && source.link == b.ty * width + b.tx;
+        }
         case BType::LiquidRouter:
             return sameOrEmpty;
         default:
@@ -271,8 +393,22 @@ void Game::handleLiquid(Building& b, int liquid, float amount) {
     b.liquidAmount += amount;
 }
 
+// LiquidJunction.getLiquidDestination: pass straight through, or stay (junctions hold nothing)
+Building* Game::liquidDestination(Building* via, const Building& source, int liquid) {
+    const Building* src = &source;
+    for (int guard = 0; via && via->def().type == BType::LiquidJunction && guard < 64; guard++) {
+        int dir = relativeTo(*src, *via);
+        if (dir < 0) return via;
+        Building* next = buildAt(via->tx + ld4x[dir], via->ty + ld4y[dir]);
+        if (!next || (!acceptLiquid(*next, *via, liquid) && next->def().type != BType::LiquidJunction)) return via;
+        src = via; via = next;
+    }
+    return via;
+}
+
 // Building.moveLiquid
 float Game::moveLiquid(Building& b, Building* next, int liquid) {
+    if (next) next = liquidDestination(next, b, liquid);
     if (!next || b.liquid != liquid) return 0;
     const BlockDef& d = b.def();
     const BlockDef& nd = next->def();
@@ -297,9 +433,10 @@ void Game::dumpLiquid(Building& b, int liquid, float scaling) {
     int dmp = b.cdump;
     for (int i = 0; i < n; i++) {
         b.cdump = (b.cdump + 1) % n;
-        Building& other = builds[b.proximity[(i + dmp) % n]];
+        Building* dest = liquidDestination(&builds[b.proximity[(i + dmp) % n]], b, liquid);
+        Building& other = *dest;
         const BlockDef& od = other.def();
-        if (!od.hasLiquids || other.team != b.team) continue;
+        if (!od.hasLiquids || other.team != b.team || other.def().type == BType::LiquidJunction) continue;
         float otherAmount = other.liquid == liquid ? other.liquidAmount : 0.f;
         float ofract = otherAmount / od.liquidCapacity;
         float fract = b.liquidAmount / b.def().liquidCapacity;
@@ -323,7 +460,7 @@ void Game::moveLiquidForward(Building& b) {
     if (!t) return;
     if (t->build >= 0) { moveLiquid(b, &builds[t->build], b.liquid); return; }
     bool solidTile = t->env && kBlocks[t->env].type == BType::StaticWall;
-    if (!solidTile) {
+    if (!solidTile && !(b.def().variant & 2)) {  // ArmoredConduit: leaks = false
         // Puddles.deposit: puddles are not ported, the leaked amount is lost
         float leak = b.liquidAmount / 1.5f;
         b.liquidAmount -= leak;
@@ -340,7 +477,8 @@ static void updateLiquidBlock(Game& g, Building& b, float delta) {
             if (b.pumpDrop >= 0 && (b.liquid == b.pumpDrop || b.liquid < 0 || b.liquidAmount < 0.2f)) {
                 if (b.liquid != b.pumpDrop) { b.liquid = b.pumpDrop; b.liquidAmount = 0; }
                 bool should = b.liquidAmount < d.liquidCapacity - 0.01f;
-                float maxPump = should ? std::fmin(d.liquidCapacity - b.liquidAmount, b.pumpTiles * d.pumpAmount * delta) : 0.f;
+                float eff = d.powerUse > 0 ? b.powerStatus : 1.f;  // rotary / impulse pumps: consumePower
+                float maxPump = should ? std::fmin(d.liquidCapacity - b.liquidAmount, b.pumpTiles * d.pumpAmount * eff * delta) : 0.f;
                 b.liquidAmount += maxPump;
                 g.liquidPumped += maxPump;
                 b.warmup = approach(b.warmup, maxPump > 0.001f ? 1.f : 0.f, 0.019f * delta);
@@ -435,6 +573,8 @@ void Game::updateBuilding(int32_t idx, float delta) {
         case BType::Pump: case BType::Conduit: case BType::LiquidRouter:
             updateLiquidBlock(*this, b, delta);
             break;
+        case BType::Unloader: updateUnloader(*this, b, delta); break;
+        case BType::LiquidBridge: updateLiquidBridge(*this, b, delta); break;
         case BType::Solar:
             // SolarGenerator.updateTile: solarMultiplier * (lighting ? 1 - ambientLight.a : 1);
             // the ported sectors have no lighting rule, so efficiency is 1
@@ -547,6 +687,7 @@ void Game::updatePower(float delta) {
         if (d.powerProduction > 0) produced[b.graph] += d.powerProduction * b.productionEfficiency * delta;
         if (d.powerUse > 0) {
             bool should = true;
+            if (d.type == BType::Pump) should = b.liquidAmount < d.liquidCapacity - 0.01f;  // Pump.shouldConsume
             if (d.type == BType::Crafter) {
                 should = d.output.item < 0 || b.items.amount[d.output.item] + d.output.amount <= d.itemCapacity;
                 for (int i = 0; i < d.nconsumes; i++) if (!b.items.has(d.consumes[i].item, d.consumes[i].amount)) should = false;
@@ -662,7 +803,8 @@ std::vector<int32_t> Game::potentialPowerLinks(int16_t block, int tx, int ty, ui
 
 bool Game::bridgeLinkValid(const Building& a, const Building& b) const {
     // ItemBridge.positionsValid: same axis, within range, both bridges of the same team
-    if (&a == &b || !b.alive || b.def().type != BType::Bridge || a.team != b.team) return false;
+    // ItemBridge.linkValid: same block (item or liquid bridge), same team
+    if (&a == &b || !b.alive || b.block != a.block || a.team != b.team) return false;
     int dx = b.tx - a.tx, dy = b.ty - a.ty;
     if ((dx != 0) == (dy != 0)) return false;
     return std::abs(dx + dy) <= (int)a.def().range;

@@ -27,11 +27,12 @@ Légende : **présent** · **partiel** · **absent** · **adaptation nécessaire
 | Fonctionnalité Forge3DS | État | Détail |
 |---|---|---|
 | Pompe mécanique, conduites, réservoir, eau | présent | 0.3, voir `LIQUIDES_0.3.md` |
-| Pétrole, cryofluide, laitier, jonction/pont liquides | absent | structure prête (`LIQUIDS`), contenu non ajouté |
+| Jonction, routeur et ponts liquides, conduites pulsée et blindée, pompes rotative et à impulsion | présent | 0.4 lot 1 |
+| Pétrole, cryofluide, laitier | absent | lot 2 |
 | Presse à graphite, fonderie de silicium, four à verre | présent | |
 | Pulvérisateur, mélangeur de pyratite, mélangeur d'explosif | présent | ajoutés dans la 0.2 (objets et énergie uniquement) |
 | Cultivateur, presse à spores, plastanium, centrifugeuse, cryofluide, tissu phasé, alliage, fondeur, séparateur | absent | dépendent des liquides ou de blocs non portés |
-| Déchargeur, conteneurs liés au noyau | partiel | conteneur et coffre-fort présents, sans déchargeur ni lien au noyau |
+| Déchargeur, conteneurs liés au noyau | partiel | déchargeur à filtre tactile (0.4) ; conteneurs non liés au noyau |
 | Commandes optionnelles (ATELIERS) | adaptation nécessaire | propres à Forge3DS, absentes de Mindustry |
 
 ## Logistique et construction
@@ -41,7 +42,8 @@ Légende : **présent** · **partiel** · **absent** · **adaptation nécessaire
 | Convoyeurs basique et titane, raccords | présent | `Conveyor` / `Autotiler`, voir `AMELIORATIONS_0.2.md` |
 | Tracé maintenu, rotation sans repayer | présent | rotation rapide, découpe des diagonales |
 | Routeur, jonction, trieur, portes, pont | présent | |
-| Convoyeur plastanium | absent | |
+| Tapis blindé, pont de phase | présent | 0.4 lot 1 |
+| Convoyeur plastanium | absent | `StackConveyor`, voir REPRISE.md |
 | Démolir une zone (rectangle) | absent | adaptation possible du « break » rectangulaire de Mindustry |
 | Schémas (copier/coller) | absent | |
 
@@ -55,6 +57,6 @@ Légende : **présent** · **partiel** · **absent** · **adaptation nécessaire
 | Usines d'unités, unités alliées, ralliement | absent | |
 | Survie libre, bac à sable | absent | |
 | Tourelles Duo, Scatter, Hail | présent | |
-| Sauvegarde automatique | partiel | synchrone toutes les 2 minutes ; pas de fil d'arrière-plan comme Forge3DS 1.4.1 |
+| Sauvegarde automatique | partiel | réglable (2/5/10 min/désactivée), copie `.prev` récupérable ; synchrone |
 | Grandes cartes / agrandissement | adaptation nécessaire | les cartes officielles ont leur taille propre |
 | Banc d'essai et mesures | partiel | FPS et temps CPU dans le menu pause ; pas de banc séparé |

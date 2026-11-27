@@ -48,6 +48,12 @@ BUILDABLE = {
     "powerNode": "PowerNode", "battery": "Battery",
     "solarPanel": "Solar", "largeSolarPanel": "Solar",
     "mechanicalPump": "Pump", "conduit": "Conduit", "liquidTank": "LiquidRouter",
+    # 0.4 lot 1: transport and liquids
+    "unloader": "Unloader", "armoredConveyor": "Conveyor", "phaseConveyor": "Bridge",
+    "liquidRouter": "LiquidRouter", "liquidJunction": "LiquidJunction",
+    "bridgeConduit": "LiquidBridge", "phaseConduit": "LiquidBridge",
+    "pulseConduit": "Conduit", "platedConduit": "Conduit",
+    "rotaryPump": "Pump", "impulsePump": "Pump",
     "steamGenerator": "ConsumeGen",
     "duo": "ItemTurret", "scatter": "ItemTurret", "hail": "ItemTurret",
     "copperWall": "Wall", "copperWallLarge": "Wall",
@@ -57,6 +63,12 @@ BUILDABLE = {
     "container": "Storage", "vault": "Storage",
 }
 UNITS = ["dagger", "flare", "alpha", "beta"]
+# BlockDef.variant bits: subclass behaviour that shares an engine type
+VARIANT = {
+    "armoredConveyor": 1,   # ArmoredConveyor.acceptItem: conveyors or from behind only
+    "platedConduit": 1 | 2, # ArmoredConduit: same acceptance rule, leaks = false
+    "phaseConveyor": 4,     # plain ItemBridge (transportTime), not BufferedItemBridge
+}
 # Liquids.java fields ported so far (extensible: add oil, cryofluid, slag...)
 LIQUIDS = ["water"]
 ENV_FLOOR = {"Floor", "ShallowLiquid", "EmptyFloor", "SteamVent", "AirBlock"}
@@ -697,11 +709,21 @@ def assign_sprites(up, sp, blocks, items, units):
             continue
         if t == "Conduit":
             # Conduit.drawAt: bottom (Draw.color(botColor 565656), multiplied), liquid, top; 5 blend variants
-            b["spr_var"] = sp.add_derived(n + "-bottom-0-tinted", "conduit-bottom-0", lambda im: tint_image(im, 0x565656))
+            bot = n if up.sprite(n + "-bottom-0") else "conduit"  # @Load(fallback = "conduit-bottom-#")
+            b["spr_var"] = sp.add_derived(bot + "-bottom-0-tinted", bot + "-bottom-0", lambda im: tint_image(im, 0x565656))
             for i in range(1, 5):
-                sp.add_derived("%s-bottom-%d-tinted" % (n, i), "conduit-bottom-%d" % i, lambda im: tint_image(im, 0x565656))
+                sp.add_derived("%s-bottom-%d-tinted" % (bot, i), "%s-bottom-%d" % (bot, i), lambda im: tint_image(im, 0x565656))
             for i in range(5):
                 sp.add("%s-top-%d" % (n, i))  # spr_var + 5 + i
+            continue
+        if t == "LiquidBridge":  # ItemBridge drawing: region, end, bridge
+            b["spr"] = sp.add(n)
+            b["spr_top"] = sp.add(n + "-end")
+            b["spr_rot"] = sp.add(n + "-bridge")
+            continue
+        if t == "Unloader":  # Unloader.draw: region + center tinted with the sort item colour
+            b["spr"] = sp.add(n)
+            b["spr_top"] = sp.add(n + "-center")
             continue
         if t == "LiquidRouter":  # LiquidRouter.draw: bottom, liquid tiles, region
             b["spr"] = sp.add(n)
@@ -756,7 +778,7 @@ def assign_sprites(up, sp, blocks, items, units):
         elif t == "Bridge":
             b["spr_top"] = sp.add(n + "-end")
             b["spr_rot"] = sp.add(n + "-bridge")
-            b["spr_extra"] = sp.add(n + "-arrow")
+            b["spr_extra"] = sp.add(n + "-arrow", required=False)
     for b in blocks:
         b["spr_icon"] = -1
         if b["type"] in ("Air", "Floor", "Ore", "Overlay", "StaticWall", "Prop"):
@@ -812,6 +834,8 @@ def icon_layers(up, b):
         return layers
     if t == "Conduit":                      # Conduit.icons(): conduit-bottom, topRegions[0]
         return [("conduit-bottom", False, 0x565656), (n + "-top-0", False, None)]
+    if t == "Unloader":
+        return [(n, False, None), (n + "-center", False, None)]
     if t == "LiquidRouter":                 # LiquidRouter.icons(): bottomRegion, region
         return [(n + "-bottom", False, None), (n, False, None)]
     if t == "Conveyor":                     # Conveyor.icons(): regions[0][0]
@@ -904,7 +928,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
                   "{%s}, %d, {%s}, %d, {%d, %d}, %s, %s, %s, "
                   "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %s, "
                   "%s, %s, %d, %s, %s, %s, %s, %s, %s, %d, "
-                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d, %s},") % (
+                  "%s, %s, %s, %s, %s, %d, %d, %d, %d, {%s}, %d, %d, %d, %s, %d},") % (
             b["name"], b["type"], cat_i, size, flag("solid"), flag("rotate"), buildable,
             cfloat(health), cfloat(build_cost), int(num("itemCapacity", 10)),
             req_s, len(reqs[:4]), cons_s, len(b["consumes"][:3]),
@@ -922,7 +946,7 @@ def write_content(gen, blocks, items, units, sectors, sp, block_ids, item_ids, u
             int(shoot.get("shots", 1)), 1 if v.get("targetAir", True) is not False else 0,
             1 if v.get("targetGround", True) is not False else 0, ammo_s, len(b["ammo"][:3]),
             b.get("spr_icon", -1), 1 if b.get("square", True) else 0,
-            liquid_cols(b, num, flag),
+            liquid_cols(b, num, flag), VARIANT.get(b["field"], 0),
         ))
         b["tier"] = int(num("tier"))
     c.append("};")
@@ -971,13 +995,13 @@ def liquid_cols(b, num, flag):
     """Liquid fields of BlockDef: capacity, pumpAmount, consumeLiquid, floor liquidDrop..."""
     ids = b.get("liquid_ids", {})
     t = b["type"]
-    has = t in ("Pump", "Conduit", "LiquidRouter") or "liquid_use" in b
+    has = t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") or "liquid_use" in b
     use = b.get("liquid_use")
     drop = b.get("liquid_drop")
     # Block.liquidCapacity defaults to 10; LiquidRouter(20) / tank values come from the class/def
     cap = num("liquidCapacity", 10) if has else 0
     # LiquidBlock.outputsLiquid = true (Pump, Conduit, LiquidRouter)
-    outputs = 1 if t in ("Pump", "Conduit", "LiquidRouter") else 0
+    outputs = 1 if t in ("Pump", "Conduit", "LiquidRouter", "LiquidBridge", "LiquidJunction") else 0
     return "%s, %s, %d, %s, %d, %s, %d, %d, %d, %s" % (
         cfloat(cap), cfloat(num("pumpAmount", 0.2) if t == "Pump" else 0),
         ids.get(use[0], -1) if use else -1, cfloat(use[1] if use else 0),

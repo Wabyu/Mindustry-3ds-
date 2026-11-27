@@ -246,6 +246,40 @@ int main(int argc, char** argv) {
         record(app, "water_pump");
         app.hideHud = true;
     }
+    // 0.4 lot 1: unloader, armored belt, phase conveyor, liquid junction/router/bridge, plated conduit, rotary pump
+    {
+        Game& g = app.game;
+        emptyMap(g, 40, 30, B_stone);
+        for (int y = 4; y <= 9; y++) for (int x = 2; x <= 5; x++) g.tile(x, y)->floor = B_shallow_water;
+        g.addBuilding(B_core_shard, 34, 24, TeamSharded, 0);
+        int cont = g.addBuilding(B_container, 6, 16, TeamSharded, 0);
+        g.builds[cont].items.add(I_copper, 200);
+        int un = g.addBuilding(B_unloader, 8, 16, TeamSharded, 0);
+        g.builds[un].sortItem = I_copper;
+        for (int x = 9; x <= 12; x++) g.addBuilding(B_armored_conveyor, x, 16, TeamSharded, 0);
+        int pc1 = g.addBuilding(B_phase_conveyor, 13, 16, TeamSharded, 0);
+        int pc2 = g.addBuilding(B_phase_conveyor, 20, 16, TeamSharded, 0);
+        g.toggleBridgeLink(pc1, pc2);
+        g.addBuilding(B_rotary_pump, 4, 6, TeamSharded, 0);
+        for (int x = 6; x <= 9; x++) g.addBuilding(B_pulse_conduit, x, 7, TeamSharded, 0);
+        g.addBuilding(B_liquid_junction, 10, 7, TeamSharded, 0);
+        g.addBuilding(B_plated_conduit, 11, 7, TeamSharded, 0);
+        g.addBuilding(B_liquid_router, 12, 7, TeamSharded, 0);
+        int lb1 = g.addBuilding(B_bridge_conduit, 13, 7, TeamSharded, 0);
+        int lb2 = g.addBuilding(B_bridge_conduit, 17, 7, TeamSharded, 0);
+        g.toggleBridgeLink(lb1, lb2);
+        g.addBuilding(B_liquid_tank, 19, 7, TeamSharded, 0);
+        int gen = g.addBuilding(B_combustion_generator, 4, 9, TeamSharded, 0);
+        g.builds[gen].items.add(I_coal, 10);
+        for (int t = 0; t < 60 * 10; t++) g.update(1.f);
+        app.hideHud = false;
+        app.camX = 12 * tilesize; app.camY = 12 * tilesize;
+        app.cursorDX = 0; app.cursorDY = 0;
+        app.configuring = un; app.cursorTX = 8; app.cursorTY = 16;
+        record(app, "lot1_transport");
+        app.configuring = -1;
+        app.hideHud = true;
+    }
     // palette of every category (bottom screen)
     {
         Game& g = app.game;

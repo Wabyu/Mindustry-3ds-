@@ -13,7 +13,8 @@ enum class BType : uint8_t {
     Drill, Crafter, ConsumeGen, PowerNode, Battery,
     ItemTurret, Wall, Core, Storage,
     Solar,  // SolarGenerator
-    Pump, Conduit, LiquidRouter  // liquids
+    Pump, Conduit, LiquidRouter,  // liquids
+    Unloader, LiquidJunction, LiquidBridge
 };
 
 // mindustry.type.Category order
@@ -68,6 +69,7 @@ struct BlockDef {
     int16_t liquidDrop; float liquidMultiplier;        // Floor
     bool floating, outputsLiquid, hasLiquids;
     float liquidPressure;
+    uint8_t variant;  // 1 armored (accept from belts/behind only), 2 no leak, 4 plain ItemBridge
 };
 
 struct LiquidDef {
